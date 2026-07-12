@@ -1,0 +1,16 @@
+# Host environment for DATA PREPARATION and EVALUATION (NOT training).
+# RL training runs inside the `miles` container (Megatron-LM + SGLang); see
+# train/rl/REPRODUCTION.md. These are the packages the data-prep + eval scripts
+# (rlad_plugin/data_prep.py, rlad_plugin/warmstart_gen.py, eval/eval_rlad.py) import.
+# Pins reflect a known-good combination; newer versions may work.
+torch==2.6.0
+transformers==4.51.3
+vllm==0.8.5.post1
+datasets>=2.19
+math-verify
+pyarrow
+hf_transfer
+numpy
+# Optional: an OpenAI-compatible client for warmstart abstraction distillation
+# (rlad_plugin/warmstart_gen.py). Configure the base URL/key for your provider.
+openai

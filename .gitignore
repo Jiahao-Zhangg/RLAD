@@ -1,0 +1,25 @@
+# --- external RL framework (clone per REPRODUCTION.md; not vendored) ---
+train/rl/miles/
+
+# --- run artifacts / data / logs (regenerate via data_prep + training) ---
+train/rl/runs/
+train/rl/data/
+train/rl/logs/
+runs/
+data/
+logs/
+*.sqsh
+*.pt
+*.safetensors
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# --- misc ---
+.env
+*.log
+.DS_Store

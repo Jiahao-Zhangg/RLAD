@@ -1,0 +1,15 @@
+RLAD
+Copyright (c) 2025 CMU-AIRe
+
+This repository is released under the MIT License (see LICENSE).
+
+It reimplements the RLAD method as a plugin on top of the `miles` reinforcement
+learning framework (Megatron-LM + SGLang), developed by radixark and released
+under the Apache License 2.0:
+
+    https://github.com/radixark/miles
+
+`miles` is NOT vendored in this repository; it is referenced as an external
+dependency (a pinned commit + a one-line temperature patch under
+train/rl/patches/). See train/rl/REPRODUCTION.md for setup. When you clone
+miles, its Apache-2.0 license and NOTICE apply to that code.
