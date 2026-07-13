@@ -1,8 +1,8 @@
 # Original RLAD SFT/RFT on P5 + FSx
 
-This runbook prepares only the original RLAD abstraction generator: warm-start SFT followed by
-offline RFT. It assumes the repository is cloned at
-`/fsx/gstevenw/testing_alignment_algos/RLAD`, Slurm exposes eight GPUs with
+This runbook prepares the original RLAD abstraction generator: warm-start SFT, offline RFT,
+Hugging Face publication, and the final DeepScaleR-hard comparison. It assumes the repository is
+cloned at `/fsx/gstevenw/testing_alignment_algos/RLAD`, Slurm exposes eight GPUs with
 `--gpus-per-node=8`, and Pyxis/enroot accepts `--container-image`.
 
 ## Automated controller
@@ -25,9 +25,36 @@ The controller remains in the foreground while GPU jobs run. If it is interrupte
 is deliberately left alone; reconnect and run `./RFT_pipeline.sh resume`. Use
 `./RFT_pipeline.sh status` from another shell for a read-only summary. RFT caches are tied to the
 exact SFT checkpoint and sampling settings. For stale or corrupt RFT artifacts under the same
-settings, `./RFT_pipeline.sh archive-rft` moves RFT data and checkpoints aside instead of deleting
-them, and refuses to run while a related Slurm job is active. To change pipeline parameters or
+settings, `./RFT_pipeline.sh archive-rft` moves RFT data, checkpoints, and local comparison outputs
+aside instead of deleting them, and refuses to run while a related Slurm job is active. It does
+not delete already-published HF repositories or W&B runs. To change pipeline parameters or
 the repository commit, move both `train/rl/data` and `train/rl/runs` aside and start a fresh run.
+
+After training, the same `run` command publishes four private repositories under the username
+returned by the existing HF login:
+
+- `rlad-original-absgen-sft-data` and `rlad-original-absgen-rft-data`
+- `rlad-original-absgen-sft-model` and `rlad-original-absgen-rft-model`
+
+Set `HF_REPO_PREFIX`, `HF_NAMESPACE`, or the four exact `HF_*_REPO` values in `.env.cluster` to
+rename them. Set `HF_REPO_PRIVATE=0` only when the artifacts should be public. Uploads are
+idempotent and `runs/rft_pipeline/hf_publish.json` records the verified destinations.
+
+The final evaluation uses the codebase defaults on `data/benchmarks/dsr_hard.jsonl`: base solver
+`Qwen/Qwen3-1.7B`, `K=4` hints, `N=32` solutions per condition, temperature `0.6`, top-p `0.95`,
+and 32,768 output tokens. It logs exactly these percentages to the W&B project configured by
+`WANDB_PROJECT` (default `repro-paper003-rlad`):
+
+1. base without a hint;
+2. base with untrained-base hints, averaged across hints;
+3. base with the best untrained-base hint;
+4. base with RFT-generator hints, averaged across hints;
+5. base with the best RFT-generator hint.
+
+The no-hint samples are generated only once. Evaluation shards resume at complete
+problem/condition groups and may require many `03:55:00` segments; the controller submits up to
+`EVAL_SEGMENTS=12` per invocation, then a later `./RFT_pipeline.sh resume` continues. Use
+`./RFT_pipeline.sh status` to print the five values, W&B URL, and HF repository URLs.
 
 The manual commands below remain useful for inspection and recovery.
 
@@ -42,12 +69,16 @@ source .env.cluster
 
 mkdir -p "$RLAD_DATA" "$RLAD_RUNS" "$RLAD_LOGS" "$HF_HOME" "$(dirname "$RLAD_CONTAINER")"
 scripts/bootstrap_host.sh
+rlad_activate_conda
+hf auth whoami
+wandb login --verify
 ```
 
 The bootstrap creates/updates the `rlad` Conda environment and prepares `miles` at commit
 `9437366e0` with the repository patch. It does not create the training container. Copy or build a
 compatible `miles.sqsh`, then verify `test -f "$RLAD_CONTAINER"`. All container-visible paths are
-under `/fsx`, which is mounted as `/fsx:/fsx`; home mounting remains disabled.
+under `/fsx`, which is mounted as `/fsx:/fsx`; home mounting remains disabled. Run the HF check
+after sourcing the profile because cached HF credentials live under its configured `HF_HOME`.
 
 Always source `.env.cluster` in a new login shell. Submit direct jobs through `jobs/sbatch.sh` so
 the P5 partition, 32 CPUs, 400 GiB RAM, job working directory, and optional account are applied

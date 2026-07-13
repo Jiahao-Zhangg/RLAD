@@ -30,6 +30,11 @@ MODE=${MODE:-dual}
 [[ "${MODE}" == "joint" ]] || : "${ABSGEN_HF:?set ABSGEN_HF (pi_abs HF dir) for MODE=dual}"
 ABSGEN_HF=${ABSGEN_HF:-}
 BENCHMARK=${BENCHMARK:-aime25}; N=${N:-32}; K=${K:-4}; MAX_TOKENS=${MAX_TOKENS:-32768}
+ABS_MAX_TOKENS=${ABS_MAX_TOKENS:-1024}; TEMPERATURE=${TEMPERATURE:-0.6}; TOP_P=${TOP_P:-0.95}
+SEED=${SEED:-1234}; SKIP_WOABS=${SKIP_WOABS:-0}
+[[ "${SKIP_WOABS}" == 0 || "${SKIP_WOABS}" == 1 ]] || {
+  echo "ERROR: SKIP_WOABS must be 0 or 1" >&2; exit 2;
+}
 
 rlad_activate_conda
 # (optional) source your own env file for API keys, e.g. NVIDIA_API_KEY / WANDB_API_KEY
@@ -43,27 +48,43 @@ export TRITON_CACHE_DIR=${CACHE_ROOT}/triton
 mkdir -p "${XDG_CACHE_HOME}" "${VLLM_CACHE_ROOT}" "${TORCHINDUCTOR_CACHE_DIR}" "${TRITON_CACHE_DIR}"
 export PYTHONUNBUFFERED=1
 mkdir -p "${OUT}" "${RLAD_LOGS}"
-# trim Megatron vocab padding on local HF dirs before vLLM (idempotent)
-for M in "${ABSGEN_HF}" "${SOLGEN_HF}"; do [[ -d "$M" ]] && python "${CODE}/eval/trim_vocab_padding.py" "$M" || true; done
 
 cd "${CODE}/eval"
 NSHARDS=${NSHARDS:-8}; CHUNK=${CHUNK:-8}
 STAGE=solve; [[ "${MODE}" == "joint" ]] && STAGE=joint
 if [[ "${MODE}" != "joint" ]]; then
   echo "=== gen-abs (pi_abs=${ABSGEN_HF}) ==="
-  CUDA_VISIBLE_DEVICES=0 python eval_rlad.py gen-abs   --absgen-hf "${ABSGEN_HF}" --benchmark "${BENCHMARK}" --out "${OUT}" --k "${K}"
+  CUDA_VISIBLE_DEVICES=0 python eval_rlad.py gen-abs --absgen-hf "${ABSGEN_HF}" \
+    --benchmark "${BENCHMARK}" --out "${OUT}" --k "${K}" \
+    --abs-max-tokens "${ABS_MAX_TOKENS}" --seed "${SEED}" --chunk "${CHUNK}"
 fi
 echo "=== ${STAGE} (pi_sol=${SOLGEN_HF}), ${NSHARDS}-way data-parallel ==="
 # one process per GPU; per-shard files + skip-done => resumable across cancels/timeouts
 pids=()
+SOLVE_ARGS=(
+  --solgen-hf "${SOLGEN_HF}"
+  --benchmark "${BENCHMARK}"
+  --out "${OUT}"
+  --n "${N}"
+  --k "${K}"
+  --max-tokens "${MAX_TOKENS}"
+  --temperature "${TEMPERATURE}"
+  --top-p "${TOP_P}"
+  --seed "${SEED}"
+  --chunk "${CHUNK}"
+)
+[[ "${SKIP_WOABS}" == 0 ]] || SOLVE_ARGS+=(--skip-woabs)
 for s in $(seq 0 $((NSHARDS-1))); do
-  CUDA_VISIBLE_DEVICES=$s python eval_rlad.py ${STAGE} --solgen-hf "${SOLGEN_HF}" --benchmark "${BENCHMARK}" \
-    --out "${OUT}" --n "${N}" --max-tokens "${MAX_TOKENS}" --chunk "${CHUNK}" --shard "$s" --num-shards "${NSHARDS}" \
+  CUDA_VISIBLE_DEVICES=$s python eval_rlad.py "${STAGE}" "${SOLVE_ARGS[@]}" \
+    --shard "$s" --num-shards "${NSHARDS}" \
     > "${RLAD_LOGS}/evalrlad_${STAGE}_shard${s}_${SLURM_JOB_ID}.log" 2>&1 &
   pids+=($!)
 done
 rc=0; for p in "${pids[@]}"; do wait "$p" || rc=1; done
 echo "${STAGE} shards done (rc=$rc)"
+(( rc == 0 )) || exit "${rc}"
 echo "=== summarize ==="
-python eval_rlad.py summarize --benchmark "${BENCHMARK}" --out "${OUT}"
+SUMMARY_ARGS=(--benchmark "${BENCHMARK}" --out "${OUT}" --mode "${MODE}" --n "${N}" --k "${K}")
+[[ "${SKIP_WOABS}" == 0 ]] || SUMMARY_ARGS+=(--skip-woabs)
+python eval_rlad.py summarize "${SUMMARY_ARGS[@]}"
 echo "eval_rlad job ${SLURM_JOB_ID} done -> ${OUT}/summary.json"

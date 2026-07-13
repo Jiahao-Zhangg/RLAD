@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stateful launcher for the original RLAD abstraction-generator SFT + offline RFT pipeline.
+# Stateful launcher for original RLAD abstraction-generator training, publication, and evaluation.
 # Run `./RFT_pipeline.sh help` for the cross-machine workflow.
 
 set -Eeuo pipefail
@@ -31,6 +31,25 @@ RFT_MARGIN=${RFT_MARGIN:-0.0}
 RFT_EPOCHS=${RFT_EPOCHS:-3}
 TRAIN_BATCH=${TRAIN_BATCH:-128}
 RFT_MIN_ROWS=${RFT_MIN_ROWS:-128}
+
+# The repository's default dual-evaluation protocol. The untrained abstraction
+# generator and the solver are both the fixed Qwen3-1.7B base model.
+EVAL_BENCHMARK=${EVAL_BENCHMARK:-dsr_hard}
+EVAL_K=${EVAL_K:-4}
+EVAL_N=${EVAL_N:-32}
+EVAL_MAX_TOKENS=${EVAL_MAX_TOKENS:-32768}
+EVAL_ABS_MAX_TOKENS=${EVAL_ABS_MAX_TOKENS:-1024}
+EVAL_TEMPERATURE=${EVAL_TEMPERATURE:-0.6}
+EVAL_TOP_P=${EVAL_TOP_P:-0.95}
+EVAL_SEED=${EVAL_SEED:-1234}
+EVAL_CHUNK=${EVAL_CHUNK:-8}
+EVAL_SEGMENTS=${EVAL_SEGMENTS:-12}
+
+HF_REPO_PREFIX=${HF_REPO_PREFIX:-rlad-original}
+HF_REPO_PRIVATE=${HF_REPO_PRIVATE:-1}
+WANDB_PROJECT=${WANDB_PROJECT:-repro-paper003-rlad}
+WANDB_ENTITY=${WANDB_ENTITY:-}
+WANDB_EVAL_GROUP=${WANDB_EVAL_GROUP:-absgen-rft-eval}
 
 POLL_SECONDS=${POLL_SECONDS:-60}
 BASE_EVAL_ATTEMPTS=${BASE_EVAL_ATTEMPTS:-6}
@@ -64,7 +83,7 @@ Usage: ./RFT_pipeline.sh <command>
 Commands:
   setup         Create/load train/rl/.env.cluster and prepare Conda + pinned miles.
   doctor        Check paths, tools, environment, container, mounts, and Slurm access.
-  run           Run the complete pipeline in the foreground; safe to rerun after interruption.
+  run           Train, publish to HF, and evaluate the complete pipeline; safe to resume.
   resume        Alias for run.
   status        Show artifact progress and recorded Slurm jobs without submitting anything.
   archive-rft   Archive stale RFT artifacts for a same-configuration regeneration.
@@ -78,8 +97,10 @@ Recommended on the target machine:
   # Then, inside tmux:
   ./RFT_pipeline.sh run
 
-The controller submits one Slurm stage at a time and waits for it. Ctrl-C stops only the
-controller; it never cancels a running Slurm job. Rerun `resume` to reconnect and continue.
+The controller submits one Slurm stage at a time and waits for it. After training it publishes
+the SFT/RFT corpora and checkpoints to private HF repositories, then evaluates the untrained
+and RFT abstraction generators on DeepScaleR-hard and logs five metrics to W&B. Ctrl-C stops
+only the controller; it never cancels a running Slurm job. Rerun `resume` to reconnect.
 After fixing a non-retryable training failure, explicitly use
 `RLAD_RETRY_FAILED=1 ./RFT_pipeline.sh resume` to authorize another segment.
 State and logs are kept under train/rl/runs/rft_pipeline and train/rl/logs.
@@ -164,7 +185,7 @@ doctor() {
             failures=1
         fi
     done
-    for path in "${RLAD_HOME}" "${RLAD_DATA}" "${RLAD_RUNS}" "${RLAD_CONTAINER}" \
+    for path in "${RLAD_HOME}" "${RLAD_DATA}" "${RLAD_RUNS}" "${HF_HOME}" "${RLAD_CONTAINER}" \
         "${BASE_MODEL}" "${WARMSTART_MODEL}"; do
         if [[ "${path}" == *','* || "${path}" == *$'\n'* ]]; then
             warn "value cannot be passed safely through Slurm --export: ${path}"
@@ -176,7 +197,8 @@ doctor() {
         failures=1
     fi
     for path in POOL_SIZE POOL_SEED BASE_SAMPLES BASE_MAX_TOKENS NSHARDS SFT_K SFT_EPOCHS \
-        RFT_NPROB RFT_K RFT_M RFT_MAXTOK RFT_EPOCHS TRAIN_BATCH RFT_MIN_ROWS; do
+        RFT_NPROB RFT_K RFT_M RFT_MAXTOK RFT_EPOCHS TRAIN_BATCH RFT_MIN_ROWS \
+        EVAL_K EVAL_N EVAL_MAX_TOKENS EVAL_ABS_MAX_TOKENS EVAL_SEED EVAL_CHUNK EVAL_SEGMENTS; do
         value=${!path}
         if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
             warn "${path} must be a nonnegative integer (got ${value})"
@@ -184,7 +206,8 @@ doctor() {
         fi
     done
     for path in POOL_SIZE BASE_SAMPLES BASE_MAX_TOKENS NSHARDS SFT_K SFT_EPOCHS \
-        RFT_NPROB RFT_K RFT_M RFT_MAXTOK RFT_EPOCHS TRAIN_BATCH RFT_MIN_ROWS; do
+        RFT_NPROB RFT_K RFT_M RFT_MAXTOK RFT_EPOCHS TRAIN_BATCH RFT_MIN_ROWS \
+        EVAL_K EVAL_N EVAL_MAX_TOKENS EVAL_ABS_MAX_TOKENS EVAL_CHUNK EVAL_SEGMENTS; do
         value=${!path}
         if [[ "${value}" =~ ^[0-9]+$ ]] && (( value < 1 )); then
             warn "${path} must be greater than zero"
@@ -193,6 +216,23 @@ doctor() {
     done
     if [[ "${NSHARDS}" =~ ^[0-9]+$ ]] && (( NSHARDS < 1 || NSHARDS > 8 )); then
         warn "NSHARDS must be between 1 and the allocated 8 GPUs"
+        failures=1
+    fi
+    if [[ ! "${EVAL_BENCHMARK}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+        warn "EVAL_BENCHMARK contains unsupported characters: ${EVAL_BENCHMARK}"
+        failures=1
+    fi
+    if [[ "${HF_REPO_PRIVATE}" != 0 && "${HF_REPO_PRIVATE}" != 1 ]]; then
+        warn "HF_REPO_PRIVATE must be 0 or 1"
+        failures=1
+    fi
+    if ! python3 - "${EVAL_TEMPERATURE}" "${EVAL_TOP_P}" <<'PY' >/dev/null 2>&1
+import sys
+temperature, top_p = map(float, sys.argv[1:])
+assert 0.0 < temperature <= 2.0 and 0.0 < top_p <= 1.0
+PY
+    then
+        warn "EVAL_TEMPERATURE must be in (0,2] and EVAL_TOP_P in (0,1]"
         failures=1
     fi
 
@@ -231,14 +271,14 @@ doctor() {
         # shellcheck disable=SC1090
         source "${CONDA_BASE}/etc/profile.d/conda.sh"
         if ! conda run -n "${RLAD_CONDA_ENV}" python -c \
-            'import datasets, math_verify, transformers, vllm' >/dev/null 2>&1; then
+            'import datasets, huggingface_hub, math_verify, transformers, vllm, wandb' >/dev/null 2>&1; then
             warn "Conda env ${RLAD_CONDA_ENV} is missing one or more required Python packages"
             failures=1
         fi
     fi
 
-    [[ -n "${HF_TOKEN:-}" ]] || warn "HF_TOKEN is unset (public downloads may still work)"
-    [[ -n "${WANDB_API_KEY:-}" ]] || warn "WANDB_API_KEY is unset (W&B logging will be disabled)"
+    [[ -n "${HF_TOKEN:-}" ]] || warn "HF_TOKEN is unset; a cached 'hf auth login' must be available"
+    [[ -n "${WANDB_API_KEY:-}" ]] || warn "WANDB_API_KEY is unset; a cached 'wandb login' must be available"
     if command -v srun >/dev/null 2>&1 &&
        ! srun --help 2>&1 | grep -q -- '--container-image'; then
         warn "srun help does not advertise Pyxis --container-image; verify it on a compute node"
@@ -281,7 +321,7 @@ bootstrap_host() {
     )
     if [[ -f "${marker}" && "$(<"${marker}")" == "${key}" ]] && miles_ready &&
        conda run -n "${RLAD_CONDA_ENV}" python -c \
-           'import datasets, math_verify, transformers, vllm' >/dev/null 2>&1; then
+           'import datasets, huggingface_hub, math_verify, transformers, vllm, wandb' >/dev/null 2>&1; then
         log "Host bootstrap already matches this checkout"
         return
     fi
@@ -1068,6 +1108,171 @@ PY
         die "RFT corpus validation failed or produced fewer than ${RFT_MIN_ROWS} accepted rows"
 }
 
+hf_publication_receipt_valid() {
+    python3 - "${STATE_DIR}/hf_publish.json" <<'PY' >/dev/null 2>&1
+import json, sys
+try:
+    receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    raise SystemExit(1)
+assert receipt.get("schema") == 1 and len(receipt.get("source_key", "")) == 64
+repos = receipt.get("repositories", {})
+assert set(repos) == {"sft_dataset", "rft_dataset", "sft_model", "rft_model"}
+for value in repos.values():
+    assert value.get("type") in {"dataset", "model"}
+    assert "/" in value.get("id", "") and value.get("revision") and value.get("url", "").startswith("https://")
+PY
+}
+
+run_hf_publication() {
+    local sft_hf=$1 rft_hf=$2
+    export HF_XET_HIGH_PERFORMANCE=${HF_XET_HIGH_PERFORMANCE:-1}
+    if [[ "${HF_REPO_PRIVATE}" == 1 ]]; then
+        log "Publishing SFT/RFT corpora and checkpoints to private Hugging Face repositories"
+    else
+        log "Publishing SFT/RFT corpora and checkpoints to public Hugging Face repositories"
+    fi
+    python "${RL_DIR}/scripts/publish_hf.py" \
+        --sft-dataset "${RLAD_DATA}/train_absgen_sft.jsonl" \
+        --sft-metadata "${RLAD_DATA}/absgen_sft_meta.json" \
+        --rft-dataset "${RLAD_DATA}/train_absgen_rft.jsonl" \
+        --rft-metadata "${RLAD_DATA}/absgen_rft_meta.json" \
+        --sft-model "${sft_hf}" \
+        --rft-model "${rft_hf}" \
+        --sft-model-marker "${STATE_DIR}/sft_absgen.hf.complete" \
+        --rft-model-marker "${STATE_DIR}/sft_absgen_rft.hf.complete" \
+        --receipt "${STATE_DIR}/hf_publish.json" \
+        --source-commit "$(git -C "${ROOT_DIR}" rev-parse HEAD)" \
+        --repo-prefix "${HF_REPO_PREFIX}" \
+        --private "${HF_REPO_PRIVATE}"
+    hf_publication_receipt_valid || die "Hugging Face publication receipt failed validation"
+}
+
+eval_variant_valid() {
+    local out=$1 skip_woabs=$2 args=()
+    [[ "${skip_woabs}" == 0 ]] || args+=(--skip-woabs)
+    python "${RL_DIR}/eval/eval_rlad.py" validate \
+        --benchmark "${EVAL_BENCHMARK}" --out "${out}" --mode dual \
+        --n "${EVAL_N}" --k "${EVAL_K}" "${args[@]}" >/dev/null 2>&1
+}
+
+eval_progress() {
+    python3 - "$1" <<'PY'
+import glob, json, os, sys
+abstractions, samples = set(), set()
+try:
+    for line in open(os.path.join(sys.argv[1], "abstractions.jsonl"), encoding="utf-8"):
+        if line.strip():
+            row = json.loads(line)
+            abstractions.add((row["id"], int(row["abs_idx"])))
+except (OSError, ValueError, KeyError):
+    pass
+for path in glob.glob(os.path.join(sys.argv[1], "solve_samples*.jsonl")):
+    try:
+        for line in open(path, encoding="utf-8"):
+            if line.strip():
+                row = json.loads(line)
+                samples.add((row["id"], row["cond"], int(row["sample_idx"])))
+    except (OSError, ValueError, KeyError):
+        pass
+print(f"hints={len(abstractions)},solver_samples={len(samples)}")
+PY
+}
+
+run_eval_variant() {
+    local label=$1 absgen=$2 out=$3 skip_woabs=$4 key_short=$5
+    local stage jid state before after attempt stagnant=0
+    stage="eval_${label}_${key_short}"
+    eval_variant_valid "${out}" "${skip_woabs}" && return
+    for attempt in $(seq 1 "${EVAL_SEGMENTS}"); do
+        before=$(eval_progress "${out}")
+        log "${label} abstraction evaluation progress: ${before}"
+        jid=$(submit_stage "${stage}" "${PIPELINE_ID}-e${label:0:1}-${key_short:0:6}" \
+            --export="ALL,MODE=dual,ABSGEN_HF=${absgen},SOLGEN_HF=${BASE_MODEL},OUT=${out},BENCHMARK=${EVAL_BENCHMARK},N=${EVAL_N},K=${EVAL_K},MAX_TOKENS=${EVAL_MAX_TOKENS},ABS_MAX_TOKENS=${EVAL_ABS_MAX_TOKENS},TEMPERATURE=${EVAL_TEMPERATURE},TOP_P=${EVAL_TOP_P},SEED=${EVAL_SEED},CHUNK=${EVAL_CHUNK},NSHARDS=${NSHARDS},SKIP_WOABS=${skip_woabs},CACHE_ROOT=${HF_HOME}/rlad_compile" \
+            "${RL_DIR}/jobs/eval_rlad.sbatch")
+        if wait_for_job "${jid}" "${stage}"; then
+            eval_variant_valid "${out}" "${skip_woabs}" ||
+                die "${label} evaluation job completed without a complete, valid summary"
+            return
+        fi
+        state=$(normalized_state "$(job_state "${jid}")")
+        case "${state}" in
+            TIMEOUT|PREEMPTED|NODE_FAIL|BOOT_FAIL)
+                warn "${label} evaluation segment ${attempt} ended in ${state}; resuming complete conditions"
+                ;;
+            *) die "${label} evaluation stopped in non-retryable state ${state}" ;;
+        esac
+        after=$(eval_progress "${out}")
+        if [[ "${after}" == "${before}" ]]; then stagnant=$((stagnant + 1)); else stagnant=0; fi
+        (( stagnant < 2 )) || die "${label} evaluation made no artifact progress across two segments"
+    done
+    die "${label} evaluation is incomplete after ${EVAL_SEGMENTS} segments; inspect logs and resume"
+}
+
+eval_comparison_valid() {
+    local path=$1 input_key=$2 run_id=$3
+    python3 - "${path}" "${EVAL_BENCHMARK}" "${input_key}" "${WANDB_PROJECT}" \
+        "${WANDB_EVAL_GROUP}" "${run_id}" <<'PY' >/dev/null 2>&1
+import json, sys
+path, benchmark, input_key, project, group, run_id = sys.argv[1:]
+try:
+    value = json.load(open(path, encoding="utf-8"))
+except (OSError, ValueError):
+    raise SystemExit(1)
+assert value.get("schema") == 1 and value.get("benchmark") == benchmark
+assert value.get("input_key") == input_key and value.get("unit") == "percent"
+for name in ("base_without_hint_pass1", "untrained_hint_avg_pass1", "untrained_hint_best_pass1",
+             "rft_hint_avg_pass1", "rft_hint_best_pass1"):
+    assert 0.0 <= float(value[name]) <= 100.0
+wandb = value.get("wandb", {})
+assert wandb.get("project") == project and wandb.get("group") == group
+assert wandb.get("run_id") == run_id and wandb.get("url", "").startswith("http")
+PY
+}
+
+run_absgen_evaluation() {
+    local rft_hf=$1 benchmark_file raw_key short root untrained_out rft_out combined_out
+    local wandb_key wandb_run_id summary entity_args=()
+    benchmark_file="${RLAD_DATA}/benchmarks/${EVAL_BENCHMARK}.jsonl"
+    [[ -s "${benchmark_file}" ]] || die "evaluation benchmark is missing or empty: ${benchmark_file}"
+    raw_key=$(printf '%s|%s' \
+        "$(files_digest "${benchmark_file}" "${STATE_DIR}/sft_absgen_rft.hf.complete" \
+            "${RL_DIR}/eval/eval_rlad.py" "${RL_DIR}/jobs/eval_rlad.sbatch")" \
+        "base=${BASE_MODEL}|benchmark=${EVAL_BENCHMARK}|k=${EVAL_K}|n=${EVAL_N}|max=${EVAL_MAX_TOKENS}|absmax=${EVAL_ABS_MAX_TOKENS}|temp=${EVAL_TEMPERATURE}|top_p=${EVAL_TOP_P}|seed=${EVAL_SEED}|chunk=${EVAL_CHUNK}|shards=${NSHARDS}" |
+        sha256sum | awk '{print $1}')
+    short=${raw_key:0:16}
+    root="${RLAD_RUNS}/eval/absgen_compare/${EVAL_BENCHMARK}/${short}"
+    untrained_out="${root}/untrained"
+    rft_out="${root}/rft"
+    combined_out="${root}/comparison"
+    mkdir -p "${untrained_out}" "${rft_out}" "${combined_out}"
+
+    # The baseline/no-hint condition is evaluated only once in the untrained arm.
+    run_eval_variant untrained "${BASE_MODEL}" "${untrained_out}" 0 "${short}"
+    run_eval_variant rft "${rft_hf}" "${rft_out}" 1 "${short}"
+
+    wandb_key=$(printf '%s|%s|%s|%s' "${raw_key}" "${WANDB_PROJECT}" "${WANDB_ENTITY}" \
+        "${WANDB_EVAL_GROUP}" | sha256sum | awk '{print $1}')
+    wandb_run_id="absgen-${wandb_key:0:16}"
+    summary="${combined_out}/summary.json"
+    if ! eval_comparison_valid "${summary}" "${raw_key}" "${wandb_run_id}"; then
+        [[ -z "${WANDB_ENTITY}" ]] || entity_args=(--wandb-entity "${WANDB_ENTITY}")
+        python "${RL_DIR}/eval/eval_rlad.py" compare \
+            --benchmark "${EVAL_BENCHMARK}" \
+            --untrained-out "${untrained_out}" --rft-out "${rft_out}" --out "${combined_out}" \
+            --input-key "${raw_key}" --untrained-absgen "${BASE_MODEL}" \
+            --rft-absgen "${rft_hf}" --solver-model "${BASE_MODEL}" \
+            --source-commit "$(git -C "${ROOT_DIR}" rev-parse HEAD)" \
+            --wandb-project "${WANDB_PROJECT}" --wandb-group "${WANDB_EVAL_GROUP}" \
+            --wandb-run-name "DeepScaleR-hard: untrained vs RFT (${short})" \
+            --wandb-run-id "${wandb_run_id}" "${entity_args[@]}"
+    fi
+    eval_comparison_valid "${summary}" "${raw_key}" "${wandb_run_id}" ||
+        die "combined evaluation summary or W&B receipt failed validation"
+    atomic_write "${STATE_DIR}/evaluation_summary" "${summary}"
+    log "Five-metric DeepScaleR-hard evaluation complete: ${summary}"
+}
+
 run_pipeline() {
     local sft_expected rft_expected sft_hf rft_hf
     trap on_signal INT TERM HUP
@@ -1093,7 +1298,9 @@ run_pipeline() {
         "${rft_expected}" rft-hf)
 
     atomic_write "${STATE_DIR}/final_model" "${rft_hf}"
-    log "RFT pipeline complete"
+    run_hf_publication "${sft_hf}" "${rft_hf}"
+    run_absgen_evaluation "${rft_hf}"
+    log "RFT pipeline, Hugging Face publication, and evaluation complete"
     log "Final abstraction generator: ${rft_hf}"
 }
 
@@ -1134,6 +1341,34 @@ show_status() {
             printf '  %-22s INCOMPLETE (stale path: %s)\n' 'final model' "${final_model}"
         fi
     fi
+    if hf_publication_receipt_valid; then
+        printf '  %-22s COMPLETE\n' 'HF publication'
+        python3 - "${STATE_DIR}/hf_publish.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+for name, repo in value["repositories"].items():
+    print(f"    {name:18s} {repo['url']}")
+PY
+    else
+        printf '  %-22s INCOMPLETE\n' 'HF publication'
+    fi
+    if [[ -f "${STATE_DIR}/evaluation_summary" ]] &&
+       [[ -f "$(<"${STATE_DIR}/evaluation_summary")" ]]; then
+        printf '  %-22s %s\n' 'evaluation summary' "$(<"${STATE_DIR}/evaluation_summary")"
+        python3 - "$(<"${STATE_DIR}/evaluation_summary")" <<'PY'
+import json, sys
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8"))
+    for name in ("base_without_hint_pass1", "untrained_hint_avg_pass1", "untrained_hint_best_pass1",
+                 "rft_hint_avg_pass1", "rft_hint_best_pass1"):
+        print(f"    {name:34s} {float(value[name]):6.2f}%")
+    print(f"    {'wandb':34s} {value['wandb']['url']}")
+except (OSError, ValueError, KeyError, TypeError):
+    print("    INVALID")
+PY
+    else
+        printf '  %-22s INCOMPLETE\n' 'evaluation summary'
+    fi
     if [[ -d "${STATE_DIR}/jobs" ]]; then
         printf '\nRecorded jobs:\n'
         local file jid state
@@ -1150,7 +1385,8 @@ assert_no_active_rft_jobs() {
 
     # Recorded IDs catch jobs submitted by an older commit whose job-name prefix
     # differs from the controller currently on disk.
-    for file in "${STATE_DIR}"/jobs/rft_*.job "${STATE_DIR}"/jobs/sft_absgen_rft*.job; do
+    for file in "${STATE_DIR}"/jobs/rft_*.job "${STATE_DIR}"/jobs/sft_absgen_rft*.job \
+        "${STATE_DIR}"/jobs/eval_*.job; do
         [[ -e "${file}" ]] || continue
         jid=$(<"${file}")
         if [[ "${jid}" =~ ^[0-9]+$ ]] && job_active "${jid}"; then
@@ -1165,10 +1401,10 @@ assert_no_active_rft_jobs() {
     while IFS='|' read -r active_id active_name; do
         case "${active_name}" in
             "${PIPELINE_ID}-rftgen"|"${PIPELINE_ID}-rftscore"|\
-            "${PIPELINE_ID}-rft"|"${PIPELINE_ID}-rft-hf")
+            "${PIPELINE_ID}-rft"|"${PIPELINE_ID}-rft-hf"|"${PIPELINE_ID}-e"*)
                 die "refusing to archive while RFT job ${active_id} (${active_name}) is active"
                 ;;
-            rlad-rft-data|rlad-rft-absgen|rlad-convert-hf)
+            rlad-rft-data|rlad-rft-absgen|rlad-convert-hf|rlad-eval-rlad)
                 raw=$("${SCONTROL_BIN}" show job -o "${active_id}" 2>/dev/null) ||
                     die "cannot verify the checkout used by active ${active_name} job ${active_id}; refusing to archive"
                 workdir=$(sed -n 's/.* WorkDir=\([^ ]*\).*/\1/p' <<< "${raw}")
@@ -1199,12 +1435,18 @@ archive_rft() {
     for path in "${files[@]}"; do mv -- "${path}" "${dest}/data/"; done
     [[ ! -e "${RLAD_RUNS}/sft_absgen_rft" ]] ||
         mv -- "${RLAD_RUNS}/sft_absgen_rft" "${dest}/runs/"
-    for path in "${STATE_DIR}"/rft* "${STATE_DIR}"/sft_absgen_rft* "${STATE_DIR}/final_model"; do
+    if [[ -e "${RLAD_RUNS}/eval/absgen_compare" ]]; then
+        mkdir -p "${dest}/runs/eval"
+        mv -- "${RLAD_RUNS}/eval/absgen_compare" "${dest}/runs/eval/"
+    fi
+    for path in "${STATE_DIR}"/rft* "${STATE_DIR}"/sft_absgen_rft* \
+        "${STATE_DIR}"/eval* "${STATE_DIR}"/hf_publish* "${STATE_DIR}/final_model"; do
         [[ -e "${path}" ]] && mv -- "${path}" "${dest}/state/"
     done
     if [[ -d "${STATE_DIR}/jobs" ]]; then
         mkdir -p "${dest}/state/jobs"
-        for path in "${STATE_DIR}/jobs"/rft_* "${STATE_DIR}/jobs"/sft_absgen_rft*; do
+        for path in "${STATE_DIR}/jobs"/rft_* "${STATE_DIR}/jobs"/sft_absgen_rft* \
+            "${STATE_DIR}/jobs"/eval_*; do
             [[ -e "${path}" ]] && mv -- "${path}" "${dest}/state/jobs/"
         done
     fi

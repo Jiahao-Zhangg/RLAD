@@ -241,6 +241,15 @@ Results are written to `<OUT>/summary.json` (`woabs_pass1`, `wabs_avg_pass1`, `w
 and `joint_pass1` for `MODE=joint`). Other benchmarks: pass `BENCHMARK=` a JSONL built with
 `eval/prep_benchmarks.py` (e.g. `amc23`, `aime24`, `hmmt2025`), or the held-out `dsr_hard`.
 
+For the original abstraction-generator pipeline, the root `RFT_pipeline.sh` automates a stricter
+five-number `dsr_hard` comparison after RFT. It evaluates the base Qwen3-1.7B solver without a
+hint and with `K=4` hints from (a) the untrained Qwen3-1.7B abstraction generator and (b) the
+RFT-trained generator. The no-hint condition is shared, `N=32` samples are required for every
+condition, and incomplete or duplicate groups are rejected before summary. The combined
+percentages and run URL are saved under `runs/eval/absgen_compare/` and logged to W&B. The same
+pipeline also publishes both corpora and both converted checkpoints to private-by-default HF
+repositories; see `train/rl/P5_FSX.md` for destination overrides.
+
 ---
 
 ## 8. Tests
