@@ -915,7 +915,13 @@ except (OSError, ValueError):
 assert len(corpus) >= min_rows and meta.get("kept") == len(corpus)
 assert abs(float(meta.get("margin")) - margin) < 1e-12
 assert meta.get("kept", 0) + meta.get("dropped_ineffective", 0) + meta.get("dropped_leak", 0) == len(scored)
-problem_by_qid = {row["metadata"]["qid"]: row["metadata"].get("problem") for row in curriculum_rows}
+# Source problem text from the raw dataset exactly as build-rft does, not the
+# curriculum metadata: the curriculum stores a whitespace-stripped copy, so a
+# handful of problems with leading/trailing whitespace would spuriously fail the
+# byte-exact corpus comparison below. Validate against what was actually built.
+from datasets import load_dataset
+_ds = load_dataset("agentica-org/DeepScaleR-Preview-Dataset", split="train")
+problem_by_qid = {qid: _ds[int(qid.split("-")[1])]["problem"] for qid in expected_qids}
 assert all(problem_by_qid.get(qid) for qid in expected_qids)
 sys.path.insert(0, rlad_home)
 from rlad_plugin.templates import ABSGEN_INSTRUCTION
