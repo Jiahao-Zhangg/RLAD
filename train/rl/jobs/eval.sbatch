@@ -1,7 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=rlad-eval
-#SBATCH --account=CHANGE_ME_slurm_account
-#SBATCH --partition=CHANGE_ME_gpu_partition
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=8
@@ -9,12 +7,13 @@
 #SBATCH --exclusive
 #SBATCH --time=03:55:00
 #SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
 #
 # eval.sbatch — vLLM pass@1 eval of an HF checkpoint (w/o-abstraction) on math
 # benchmarks. Runs in the HOST conda env (vLLM); no container.
 #
 # Submit (G1 base harness gate, AIME2025, n=32, 32K budget):
-#   sbatch --export=ALL,MODEL_PATH=Qwen/Qwen3-1.7B,BENCHMARKS=aime25,N_SAMPLES=32,MAX_TOKENS=32768,OUT_DIR=$PWD/runs/eval/base_qwen3_1p7b eval.sbatch
+#   jobs/sbatch.sh --export=ALL,MODEL_PATH=Qwen/Qwen3-1.7B,BENCHMARKS=aime25,N_SAMPLES=32,MAX_TOKENS=32768,OUT_DIR=$PWD/runs/eval/base_qwen3_1p7b jobs/eval.sbatch
 # Probe:  add N_SAMPLES=4
 # For RLAD w/-abstraction eval use eval_rlad.sbatch (separate; needs pi_abs).
 
@@ -32,7 +31,7 @@ MAX_TOKENS=${MAX_TOKENS:-32768}      # paper Table-2 eval budget (max extrapolat
 NUM_SHARDS=${NUM_SHARDS:-8}
 OUT_DIR=${OUT_DIR:-${RUNS}/eval/$(basename "${MODEL_PATH}")}
 
-source "${CONDA_BASE:-$HOME/miniconda3}/bin/activate" ${RLAD_CONDA_ENV}
+rlad_activate_conda
 # (optional) source your own env file for API keys, e.g. NVIDIA_API_KEY / WANDB_API_KEY
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 export PYTHONUNBUFFERED=1

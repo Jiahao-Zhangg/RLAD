@@ -1,7 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=rlad-eval-rlad
-#SBATCH --account=CHANGE_ME_slurm_account
-#SBATCH --partition=CHANGE_ME_gpu_partition
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=8
@@ -9,6 +7,7 @@
 #SBATCH --exclusive
 #SBATCH --time=03:55:00
 #SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
 #
 # eval_rlad.sbatch — DUAL eval (PRIMARY metric): w/o-abs, w/abs(avg over K), w/abs(best).
 # pi_abs proposes K abstractions; pi_sol solves. Three resumable stages (gen-abs / solve /
@@ -17,7 +16,7 @@
 # (A-eval-absgen). Resumable: resubmit (singleton) to continue a timed-out solve.
 #
 # Submit (RLAD):
-#   sbatch --export=ALL,ABSGEN_HF=$PWD/runs/sft_absgen_rft/hf,SOLGEN_HF=$PWD/runs/dapo_solgen_rlad/hf_iter100,OUT=$PWD/runs/eval/rlad_iter100,BENCHMARK=aime25 jobs/eval_rlad.sbatch
+#   jobs/sbatch.sh --export=ALL,ABSGEN_HF=$PWD/runs/sft_absgen_rft/hf,SOLGEN_HF=$PWD/runs/dapo_solgen_rlad/hf_iter100,OUT=$PWD/runs/eval/rlad_iter100,BENCHMARK=aime25 jobs/eval_rlad.sbatch
 # Submit (baseline w/abs):  SOLGEN_HF=$PWD/runs/dapo_baseline/hf_iter100, OUT=.../eval/dapo_baseline_wabs
 # Submit (base w/abs):      SOLGEN_HF=Qwen/Qwen3-1.7B, OUT=.../eval/base_wabs
 
@@ -32,7 +31,7 @@ MODE=${MODE:-dual}
 ABSGEN_HF=${ABSGEN_HF:-}
 BENCHMARK=${BENCHMARK:-aime25}; N=${N:-32}; K=${K:-4}; MAX_TOKENS=${MAX_TOKENS:-32768}
 
-source "${CONDA_BASE:-$HOME/miniconda3}/bin/activate" ${RLAD_CONDA_ENV}
+rlad_activate_conda
 # (optional) source your own env file for API keys, e.g. NVIDIA_API_KEY / WANDB_API_KEY
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 # redirect compile caches off a possibly small $HOME (quota-exceeded kills vLLM engine init)

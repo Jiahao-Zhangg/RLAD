@@ -17,7 +17,7 @@ Two resumable steps (method_spec §4 curriculum; assumptions A-curriculum/A-scor
 
 Usage:
   python -m rlad_plugin.data_prep build-pool --n-pool 6000 [--seed 42]
-  # then: sbatch jobs/eval.sbatch  (BENCHMARKS=dsr_pool N_SAMPLES=8 MAX_TOKENS=8192 OUT_DIR=runs/eval/dsr_pool_score MODEL_PATH=Qwen/Qwen3-1.7B)
+  # then: jobs/sbatch.sh jobs/eval.sbatch  (BENCHMARKS=dsr_pool N_SAMPLES=8 MAX_TOKENS=8192 OUT_DIR=runs/eval/dsr_pool_score MODEL_PATH=Qwen/Qwen3-1.7B)
   python -m rlad_plugin.data_prep partition [--hard-max 0.125 --easy-min 0.5]
 """
 

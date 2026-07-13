@@ -58,7 +58,8 @@ Both extensions and the faithful original share the same data pipeline, evaluati
 
 Everything needed is under **`train/rl/`** — see **[`train/rl/REPRODUCTION.md`](train/rl/REPRODUCTION.md)**
 for the full recipe (environment setup, dataset preparation, configs, run commands, and
-evaluation). Each version has its own training config:
+evaluation). For the original abstraction-generator SFT/RFT stages on an FSx-backed P5 Slurm
+cluster, see **[`train/rl/P5_FSX.md`](train/rl/P5_FSX.md)**. Each version has its own training config:
 
 | version | config | one-line description |
 |---|---|---|

@@ -1,7 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=rlad-train
-#SBATCH --account=CHANGE_ME_slurm_account
-#SBATCH --partition=CHANGE_ME_gpu_partition
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=8
@@ -11,6 +9,7 @@
 #SBATCH --requeue
 #SBATCH --open-mode=append
 #SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
 #
 # submit_train.sbatch — one <=4h training segment for RLAD (the reference
 # cluster's partition had a HARD 4h walltime; 03:55:00 leaves margin
@@ -32,7 +31,7 @@ CONTAINER=${CONTAINER:-${RLAD_CONTAINER}}
 # LAUNCHER override lets SFT runs reuse this sbatch with the SFT launcher (jobs/sft_launch.sh).
 LAUNCHER=${LAUNCHER:-${RLAD_HOME}/jobs/launch_train.sh}
 
-: "${ARM_CONFIG:?submit with: sbatch --export=ALL,ARM_CONFIG=<abs path to arm_*.sh> submit_train.sbatch}"
+: "${ARM_CONFIG:?submit with: jobs/sbatch.sh --export=ALL,ARM_CONFIG=<abs path to arm_*.sh> jobs/submit_train.sbatch}"
 
 if [[ ! -f "${CONTAINER}" ]]; then
     echo "ERROR: container image not found: ${CONTAINER}" >&2
@@ -53,10 +52,12 @@ echo "RLAD-Hierarchical knobs: N_HINTS=${N_HINTS:-<config default>} M_SOLS=${M_S
 echo "Container:  ${CONTAINER}"
 echo "===================================================================="
 
+CONTAINER_ARGS=(--container-image="${CONTAINER}")
+[[ -n "${RLAD_CONTAINER_MOUNTS}" ]] && CONTAINER_ARGS+=(--container-mounts="${RLAD_CONTAINER_MOUNTS}")
+[[ "${RLAD_CONTAINER_MOUNT_HOME}" == "1" ]] || CONTAINER_ARGS+=(--no-container-mount-home)
+
 srun \
-    --container-image="${CONTAINER}" \
-    --container-mounts=/lustre:/lustre \
-    --no-container-mount-home \
+    "${CONTAINER_ARGS[@]}" \
     --no-container-entrypoint \
     --export=ALL \
     --nodes=1 --ntasks=1 \

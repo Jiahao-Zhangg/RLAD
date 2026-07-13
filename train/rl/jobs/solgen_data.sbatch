@@ -1,13 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=rlad-solgen-data
-#SBATCH --account=nvr_lacr_llm
-#SBATCH --partition=batch_block1
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --time=01:00:00
 #SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
 #
 # solgen_data.sbatch — build train_solgen_rlad.jsonl (RLAD solver DAPO trainset): one abstraction
 # per curriculum problem from the RFT'd pi_abs, mixed with ~1/8 bare prompts (reward-masked).
@@ -18,7 +17,7 @@ CODE=${RLAD_HOME}
 ABSGEN_HF=${ABSGEN_HF:-$(ls -d ${RLAD_RUNS}/sft_absgen_rft/hf/iter_* 2>/dev/null | sort -V | tail -1)}
 [[ -f "${ABSGEN_HF}/config.json" ]] || { echo "ERROR: no RFT pi_abs HF at ABSGEN_HF=${ABSGEN_HF}" >&2; exit 1; }
 
-source "${CONDA_BASE:-$HOME/miniconda3}/bin/activate" ${RLAD_CONDA_ENV}
+rlad_activate_conda
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 export PYTHONUNBUFFERED=1 PYTHONPATH=${CODE}
 python "${CODE}/eval/trim_vocab_padding.py" "${ABSGEN_HF}" || true

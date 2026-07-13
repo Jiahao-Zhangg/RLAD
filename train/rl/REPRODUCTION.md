@@ -46,23 +46,32 @@ conda create -n rlad python=3.12 -y && conda activate rlad
 pip install -r ../../requirements.txt
 ```
 
+Alternatively, source a site profile and run `scripts/bootstrap_host.sh`; it creates the host
+environment when needed, installs the requirements, and prepares the pinned `miles` checkout.
+
 ### 1c. Cluster settings
 
 All Slurm scripts source [`jobs/cluster_env.sh`](jobs/cluster_env.sh), which auto-detects the repo
-layout (`RLAD_HOME`, `MILES_DIR`, `RLAD_RUNS`, `RLAD_DATA`) and exposes cluster knobs. **Edit
-`jobs/cluster_env.sh`** (or export before submitting) and the `#SBATCH` headers marked
-`CHANGE_ME`:
+layout (`RLAD_HOME`, `MILES_DIR`, `RLAD_RUNS`, `RLAD_DATA`) and exposes cluster knobs. Copy
+`.env.cluster.example` to the ignored `.env.cluster`, customize it, and source it before submitting:
 
 ```bash
-export RLAD_ACCOUNT=<your_slurm_account>       # also update the #SBATCH --account CHANGE_ME lines
-export RLAD_PARTITION=<your_gpu_partition>     # also update the #SBATCH --partition CHANGE_ME lines
-export RLAD_CONTAINER=/path/to/miles.sqsh      # pyxis/enroot image with miles deps
-export RLAD_CONDA_ENV=rlad                     # host conda env from step 1b
+cp .env.cluster.example .env.cluster
+source .env.cluster
+
+export RLAD_ACCOUNT=<your_slurm_account>       # omit when the site does not require an account
+export RLAD_PARTITION=<your_gpu_partition>
+export RLAD_CONTAINER=/path/to/miles.sqsh
+export RLAD_CONTAINER_MOUNTS=/shared:/shared   # e.g. /fsx:/fsx
 ```
 
+`#SBATCH` directives do not expand shell variables. Direct jobs therefore use `jobs/sbatch.sh`,
+which applies the site options before allocation; `jobs/chain.sh` uses the same wrapper internally.
 The reference setup is a single node of 8×H100 with Slurm + pyxis/enroot; the training scripts use
 TP=2, CP=2 and chain `≤4h` segments as a resumable singleton chain (see §5). Submit all jobs from
-`train/rl/` so relative `logs/` output paths resolve.
+`train/rl/`; the wrapper creates `logs/`, routes output there, and sets `RLAD_HOME` as the job
+working directory.
+See [`P5_FSX.md`](P5_FSX.md) for the concrete FSx/P5 profile.
 
 ---
 
@@ -79,7 +88,7 @@ export PYTHONPATH=$PWD
 python -m rlad_plugin.data_prep build-pool --n-pool 6000        # -> data/benchmarks/dsr_pool.jsonl
 
 # (2) score the base model on the pool (per-problem success rate drives the curriculum)
-sbatch --export=ALL,MODEL_PATH=Qwen/Qwen3-1.7B,BENCHMARKS=dsr_pool,N_SAMPLES=8,MAX_TOKENS=8192,OUT_DIR=$RLAD_RUNS/eval/dsr_pool_score jobs/eval.sbatch
+jobs/sbatch.sh --export=ALL,MODEL_PATH=Qwen/Qwen3-1.7B,BENCHMARKS=dsr_pool,N_SAMPLES=8,MAX_TOKENS=8192,OUT_DIR=$RLAD_RUNS/eval/dsr_pool_score jobs/eval.sbatch
 
 # (3) partition into easy / medium (+ held-out hard); rows carry the raw problem in metadata
 python -m rlad_plugin.data_prep partition --hard-max 0.125 --easy-min 0.5
@@ -94,7 +103,7 @@ non-leaking cheatsheet from each gold solution with a stronger instruct model (d
 `Qwen3-4B-Instruct-2507`; configure your own via the script's flags) and applies a leakage filter:
 
 ```bash
-sbatch jobs/warmstart.sbatch        # -> data/train_absgen_sft.jsonl  (chat "messages" format)
+jobs/sbatch.sh jobs/warmstart.sbatch        # -> data/train_absgen_sft.jsonl  (chat "messages" format)
 ```
 
 **Online-variant data.** RLAD-Hierarchical trains directly on `train_curriculum.jsonl` (bare
@@ -139,7 +148,7 @@ samples stay grouped; `HINT_MAX_TOKENS` caps the (short) abstraction generation.
 Convert the base model to Megatron `torch_dist` (used as `--ref-load` and init for all RL arms):
 
 ```bash
-sbatch jobs/prep_megatron_ckpt.sbatch      # Qwen/Qwen3-1.7B -> runs/qwen3_1p7b_torch_dist
+jobs/sbatch.sh jobs/prep_megatron_ckpt.sbatch      # Qwen/Qwen3-1.7B -> runs/qwen3_1p7b_torch_dist
 ```
 
 ---
@@ -156,16 +165,16 @@ checkpoint; abort with `scancel --name=<job_name>`). Checkpoints land in `runs/<
 cd train/rl
 
 # (1) SFT pi_abs (uses the SFT launcher)
-LAUNCHER=sft_launch.sh jobs/chain.sh rlad_plugin/configs/sft_absgen.sh 2 rlad-sft-absgen
+LAUNCHER=$PWD/jobs/sft_launch.sh jobs/chain.sh rlad_plugin/configs/sft_absgen.sh 2 rlad-sft-absgen
 #   convert the final SFT checkpoint to HF (see §6) -> runs/sft_absgen/hf/iter_<N>
 
 # (2) offline RFT pi_abs: score sampled abstractions by downstream solver success, keep the best
-sbatch --export=ALL,ABSGEN_HF=$RLAD_RUNS/sft_absgen/hf/iter_<N> jobs/rft_data.sbatch   # -> data/train_absgen_rft.jsonl
-LAUNCHER=sft_launch.sh jobs/chain.sh rlad_plugin/configs/rft_absgen.sh 1 rlad-rft-absgen
+jobs/sbatch.sh --export=ALL,ABSGEN_HF=$RLAD_RUNS/sft_absgen/hf/iter_<N> jobs/rft_data.sbatch   # -> data/train_absgen_rft.jsonl
+LAUNCHER=$PWD/jobs/sft_launch.sh jobs/chain.sh rlad_plugin/configs/rft_absgen.sh 1 rlad-rft-absgen
 #   convert -> runs/sft_absgen_rft/hf/iter_<N>   (this is the shared pi_abs used at eval)
 
 # (3) build the abstraction-conditioned solver data from the RFT'd pi_abs, then online DAPO pi_sol
-sbatch --export=ALL,ABSGEN_HF=$RLAD_RUNS/sft_absgen_rft/hf/iter_<N> jobs/solgen_data.sbatch   # -> data/train_solgen_rlad.jsonl
+jobs/sbatch.sh --export=ALL,ABSGEN_HF=$RLAD_RUNS/sft_absgen_rft/hf/iter_<N> jobs/solgen_data.sbatch   # -> data/train_solgen_rlad.jsonl
 jobs/chain.sh rlad_plugin/configs/dapo_solgen_rlad.sh 8 rlad-dapo-solgen
 ```
 
@@ -198,7 +207,7 @@ N_HINTS=4 M_SOLS=4 jobs/chain.sh rlad_plugin/configs/rlad_hierarchical.sh 4 rlad
 `miles` in-training HF export under TP+CP is unreliable; always convert offline before evaluating:
 
 ```bash
-sbatch --export=ALL,CKPT_DIR=$RLAD_RUNS/<ARM>/ckpts,OUT_DIR=$RLAD_RUNS/<ARM>/hf_iter<N>,ITER=<N> jobs/convert_hf.sbatch
+jobs/sbatch.sh --export=ALL,CKPT_DIR=$RLAD_RUNS/<ARM>/ckpts,OUT_DIR=$RLAD_RUNS/<ARM>/hf_iter<N>,ITER=<N> jobs/convert_hf.sbatch
 ```
 
 The output `hf_iter<N>/` is a standard HuggingFace model directory (load with
@@ -215,17 +224,17 @@ as HuggingFace checkpoint dirs (from §6):
 
 ```bash
 # original RLAD / +DAPO / base: pi_abs = the RFT'd generator, pi_sol = the arm's solver checkpoint
-sbatch --export=ALL,ABSGEN_HF=$RLAD_RUNS/sft_absgen_rft/hf/iter_<N>,SOLGEN_HF=$RLAD_RUNS/<ARM>/hf_iter<N>,OUT=$RLAD_RUNS/eval/<ARM>,BENCHMARK=aime25 jobs/eval_rlad.sbatch
+jobs/sbatch.sh --export=ALL,ABSGEN_HF=$RLAD_RUNS/sft_absgen_rft/hf/iter_<N>,SOLGEN_HF=$RLAD_RUNS/<ARM>/hf_iter<N>,OUT=$RLAD_RUNS/eval/<ARM>,BENCHMARK=aime25 jobs/eval_rlad.sbatch
 ```
 
 For the online variants the single model is both roles:
 
 ```bash
 # RLAD-Hierarchical (and RLAD-Joint) self-hint dual eval: point both roles at the variant checkpoint
-sbatch --export=ALL,ABSGEN_HF=$RLAD_RUNS/rlad_hierarchical/hf_iter<N>,SOLGEN_HF=$RLAD_RUNS/rlad_hierarchical/hf_iter<N>,OUT=$RLAD_RUNS/eval/rlad_hierarchical,BENCHMARK=aime25 jobs/eval_rlad.sbatch
+jobs/sbatch.sh --export=ALL,ABSGEN_HF=$RLAD_RUNS/rlad_hierarchical/hf_iter<N>,SOLGEN_HF=$RLAD_RUNS/rlad_hierarchical/hf_iter<N>,OUT=$RLAD_RUNS/eval/rlad_hierarchical,BENCHMARK=aime25 jobs/eval_rlad.sbatch
 
 # RLAD-Joint native combined-prompt eval (its training distribution): MODE=joint (no separate pi_abs)
-sbatch --export=ALL,MODE=joint,SOLGEN_HF=$RLAD_RUNS/rlad_joint/hf_iter<N>,OUT=$RLAD_RUNS/eval/rlad_joint_joint,BENCHMARK=aime25 jobs/eval_rlad.sbatch
+jobs/sbatch.sh --export=ALL,MODE=joint,SOLGEN_HF=$RLAD_RUNS/rlad_joint/hf_iter<N>,OUT=$RLAD_RUNS/eval/rlad_joint_joint,BENCHMARK=aime25 jobs/eval_rlad.sbatch
 ```
 
 Results are written to `<OUT>/summary.json` (`woabs_pass1`, `wabs_avg_pass1`, `wabs_best_pass1`,

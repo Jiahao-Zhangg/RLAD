@@ -21,5 +21,7 @@ __pycache__/
 
 # --- misc ---
 .env
+.env.cluster
+.env.cluster.local
 *.log
 .DS_Store
