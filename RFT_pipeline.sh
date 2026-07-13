@@ -61,6 +61,8 @@ POLL_SECONDS=${POLL_SECONDS:-60}
 BASE_EVAL_ATTEMPTS=${BASE_EVAL_ATTEMPTS:-6}
 BASE_CKPT_ATTEMPTS=${BASE_CKPT_ATTEMPTS:-2}
 WARMSTART_ATTEMPTS=${WARMSTART_ATTEMPTS:-1}
+CONTAINER_PREP_ATTEMPTS=${CONTAINER_PREP_ATTEMPTS:-2}
+CONTAINER_PREP_TIME=${CONTAINER_PREP_TIME:-03:55:00}
 SFT_SEGMENTS=${SFT_SEGMENTS:-2}
 CONVERT_ATTEMPTS=${CONVERT_ATTEMPTS:-2}
 RFT_GEN_ATTEMPTS=${RFT_GEN_ATTEMPTS:-2}
@@ -88,7 +90,7 @@ usage() {
 Usage: ./RFT_pipeline.sh <command>
 
 Commands:
-  setup         Create/load train/rl/.env.cluster and prepare Conda + pinned miles.
+  setup         Prepare Conda, pinned miles, and the training container image.
   doctor        Check paths, tools, environment, container, mounts, and Slurm access.
   run           Train, publish to HF, and evaluate the complete pipeline; safe to resume.
   resume        Alias for run.
@@ -108,6 +110,7 @@ The controller submits one Slurm stage at a time and waits for it. After trainin
 the SFT/RFT corpora and checkpoints to private HF repositories, then evaluates the untrained
 and RFT abstraction generators on DeepScaleR-hard and logs five metrics to W&B. Non-training
 GPU stages use the two configured inference nodes (16 global shards); training stays one-node.
+If the SquashFS training image is missing, setup imports and validates the pinned public Miles image.
 Ctrl-C stops only the controller; it never cancels a running Slurm job. Rerun `resume` to reconnect.
 After fixing a non-retryable training failure, explicitly use
 `RLAD_RETRY_FAILED=1 ./RFT_pipeline.sh resume` to authorize another segment.
@@ -134,7 +137,8 @@ load_profile() {
 
     # The profile, rather than an unrelated parent shell, owns all filesystem paths.
     unset RLAD_HOME MILES_DIR RLAD_DATA RLAD_RUNS RLAD_LOGS \
-        CONDA_BASE RLAD_CONDA_ENV HF_HOME RLAD_CONTAINER RLAD_CONTAINER_MOUNTS \
+        CONDA_BASE RLAD_CONDA_ENV HF_HOME RLAD_CONTAINER RLAD_CONTAINER_SOURCE \
+        RLAD_CONTAINER_MOUNTS \
         RLAD_CONTAINER_MOUNT_HOME RLAD_PARTITION RLAD_ACCOUNT \
         RLAD_SBATCH_CPUS_PER_TASK RLAD_SBATCH_MEMORY RLAD_SBATCH_TIME
     # shellcheck disable=SC1090
@@ -182,15 +186,31 @@ mounted_path() {
        ( "${path}" == "${HOME}" || "${path}" == "${HOME}/"* ) ]]
 }
 
+training_container_ready() {
+    local receipt="${RLAD_CONTAINER}.source" recorded_bytes actual_bytes
+    [[ -s "${RLAD_CONTAINER}" && -r "${RLAD_CONTAINER}" ]] || return 1
+    [[ -f "${receipt}" ]] || return 0
+    grep -Fqx 'schema=1' "${receipt}" || return 1
+    grep -Fqx "source=${RLAD_CONTAINER_SOURCE}" "${receipt}" || return 1
+    recorded_bytes=$(sed -n 's/^bytes=//p' "${receipt}")
+    [[ "${recorded_bytes}" =~ ^[1-9][0-9]*$ ]] || return 1
+    actual_bytes=$(stat -c '%s' "${RLAD_CONTAINER}")
+    [[ "${recorded_bytes}" == "${actual_bytes}" ]]
+}
+
 doctor() {
     local failures=0 path value expected_shards node seen_nodes=,
     local -a inference_nodes=()
-    for path in "${CONDA_BASE}/etc/profile.d/conda.sh" "${RLAD_CONTAINER}"; do
+    for path in "${CONDA_BASE}/etc/profile.d/conda.sh"; do
         if [[ ! -s "${path}" || ! -r "${path}" ]]; then
             warn "missing or empty: ${path}"
             failures=1
         fi
     done
+    if ! training_container_ready; then
+        warn "training container or its provenance receipt is invalid: ${RLAD_CONTAINER}"
+        failures=1
+    fi
     for path in "${RLAD_DATA}" "${RLAD_RUNS}" "${RLAD_LOGS}" "${HF_HOME}"; do
         if [[ ! -d "${path}" || ! -w "${path}" ]]; then
             warn "directory is missing or not writable: ${path}"
@@ -204,7 +224,7 @@ doctor() {
         fi
     done
     for path in "${RLAD_HOME}" "${RLAD_DATA}" "${RLAD_RUNS}" "${HF_HOME}" "${RLAD_CONTAINER}" \
-        "${BASE_MODEL}" "${WARMSTART_MODEL}"; do
+        "${BASE_MODEL}" "${WARMSTART_MODEL}" "${RLAD_CONTAINER_SOURCE}"; do
         if [[ "${path}" == *','* || "${path}" == *$'\n'* ]]; then
             warn "value cannot be passed safely through Slurm --export: ${path}"
             failures=1
@@ -217,6 +237,7 @@ doctor() {
     for path in POOL_SIZE POOL_SEED BASE_SAMPLES BASE_MAX_TOKENS NSHARDS SFT_K SFT_EPOCHS \
         RFT_NPROB RFT_K RFT_M RFT_MAXTOK RFT_EPOCHS TRAIN_BATCH RFT_MIN_ROWS \
         EVAL_K EVAL_N EVAL_MAX_TOKENS EVAL_ABS_MAX_TOKENS EVAL_SEED EVAL_CHUNK EVAL_SEGMENTS \
+        CONTAINER_PREP_ATTEMPTS \
         RLAD_INFERENCE_NODES RLAD_GPUS_PER_NODE; do
         value=${!path}
         if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
@@ -227,6 +248,7 @@ doctor() {
     for path in POOL_SIZE BASE_SAMPLES BASE_MAX_TOKENS NSHARDS SFT_K SFT_EPOCHS \
         RFT_NPROB RFT_K RFT_M RFT_MAXTOK RFT_EPOCHS TRAIN_BATCH RFT_MIN_ROWS \
         EVAL_K EVAL_N EVAL_MAX_TOKENS EVAL_ABS_MAX_TOKENS EVAL_CHUNK EVAL_SEGMENTS \
+        CONTAINER_PREP_ATTEMPTS \
         RLAD_INFERENCE_NODES RLAD_GPUS_PER_NODE; do
         value=${!path}
         if [[ "${value}" =~ ^[0-9]+$ ]] && (( value < 1 )); then
@@ -331,7 +353,11 @@ PY
     [[ -n "${WANDB_API_KEY:-}" ]] || warn "WANDB_API_KEY is unset; a cached 'wandb login' must be available"
     if command -v srun >/dev/null 2>&1 &&
        ! srun --help 2>&1 | grep -q -- '--container-image'; then
-        warn "srun help does not advertise Pyxis --container-image; verify it on a compute node"
+        warn "srun help does not advertise Pyxis --container-image"
+    fi
+    if command -v srun >/dev/null 2>&1 &&
+       ! srun --help 2>&1 | grep -q -- '--container-save'; then
+        warn "srun help does not advertise Pyxis --container-save"
     fi
 
     [[ ${failures} -eq 0 ]] || die "preflight failed; fix the warnings above"
@@ -379,6 +405,38 @@ bootstrap_host() {
     atomic_write "${marker}" "${key}"
 }
 
+prepare_training_container() {
+    local jid attempt state receipt="${RLAD_CONTAINER}.source"
+    [[ "${CONTAINER_PREP_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]] ||
+        die "CONTAINER_PREP_ATTEMPTS must be a positive integer"
+    [[ -n "${RLAD_CONTAINER_SOURCE}" && "${RLAD_CONTAINER_SOURCE}" != *','* &&
+       "${RLAD_CONTAINER_SOURCE}" != *$'\n'* ]] ||
+        die "RLAD_CONTAINER_SOURCE is empty or unsafe for Slurm --export"
+    if training_container_ready; then
+        log "Training container already ready: ${RLAD_CONTAINER}"
+        return
+    fi
+    if [[ -s "${RLAD_CONTAINER}" ]]; then
+        die "container exists but ${receipt} does not match ${RLAD_CONTAINER_SOURCE}; move both files aside before changing images"
+    fi
+    [[ ! -e "${RLAD_CONTAINER}" ]] ||
+        die "container target exists but is empty: ${RLAD_CONTAINER}"
+    for attempt in $(seq 1 "${CONTAINER_PREP_ATTEMPTS}"); do
+        log "Preparing training container from ${RLAD_CONTAINER_SOURCE} (attempt ${attempt})"
+        jid=$(submit_stage container_prep "${PIPELINE_ID}-container" \
+            --time="${CONTAINER_PREP_TIME}" \
+            --export="ALL,RLAD_CONTAINER=${RLAD_CONTAINER},RLAD_CONTAINER_SOURCE=${RLAD_CONTAINER_SOURCE}" \
+            "${RL_DIR}/jobs/prepare_container.sbatch")
+        if wait_for_job "${jid}" container_prep && training_container_ready; then
+            log "Training container prepared: ${RLAD_CONTAINER}"
+            return
+        fi
+        state=$(normalized_state "$(job_state "${jid}")")
+        warn "container preparation attempt ${attempt} ended in ${state:-UNKNOWN}"
+    done
+    die "could not import and validate ${RLAD_CONTAINER_SOURCE}; inspect the container_prep Slurm log"
+}
+
 activate_host_env() {
     rlad_activate_conda
     export PYTHONPATH="${RLAD_HOME}${PYTHONPATH:+:${PYTHONPATH}}"
@@ -399,6 +457,8 @@ nshards=${NSHARDS}
 inference_nodes=${RLAD_INFERENCE_NODES}
 inference_nodelist=${RLAD_INFERENCE_NODELIST}
 gpus_per_node=${RLAD_GPUS_PER_NODE}
+container=${RLAD_CONTAINER}
+container_source=${RLAD_CONTAINER_SOURCE}
 hard_max=${HARD_MAX}
 easy_min=${EASY_MIN}
 sft_k=${SFT_K}
@@ -1377,6 +1437,7 @@ show_status() {
     printf 'State:    %s\n' "${STATE_DIR}"
     printf 'Inference: %s shards on %s node(s): %s\n' \
         "${NSHARDS}" "${RLAD_INFERENCE_NODES}" "${RLAD_INFERENCE_NODELIST}"
+    stage_status 'training container' training_container_ready
     stage_status 'curriculum pool' pool_complete
     stage_status 'base scores' base_scores_complete
     stage_status 'base checkpoint' base_checkpoint_complete
@@ -1523,6 +1584,7 @@ main() {
         setup)
             load_profile 1
             bootstrap_host
+            prepare_training_container
             doctor
             log "Setup complete; run '$0 run' inside tmux"
             ;;
@@ -1533,6 +1595,7 @@ main() {
         run|resume)
             load_profile 1
             bootstrap_host
+            prepare_training_container
             doctor
             activate_host_env
             [[ -z "$(git -C "${ROOT_DIR}" status --porcelain --untracked-files=no)" ]] ||

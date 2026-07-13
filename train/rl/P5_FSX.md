@@ -22,6 +22,13 @@ tmux new -s rlad-rft
 ./RFT_pipeline.sh run
 ```
 
+On the first setup, the controller submits a one-GPU `container_prep` job. Pyxis imports the
+pinned public CUDA-12 image `radixark/miles:dev-cu12-202606172131`, verifies the allocated H100 and
+the Miles/Megatron/SGLang runtime, and atomically saves
+`/fsx/gstevenw/testing_alignment_algos/images/miles.sqsh`. Expect roughly a 25 GB registry download;
+the compute node needs outbound Docker Hub access and the FSx destination needs ample free space.
+Later setup/run invocations reuse the saved image and validate its provenance receipt.
+
 The controller remains in the foreground while GPU jobs run. If it is interrupted, the Slurm job
 is deliberately left alone; reconnect and run `./RFT_pipeline.sh resume`. Use
 `./RFT_pipeline.sh status` from another shell for a read-only summary. RFT caches are tied to the
@@ -83,10 +90,12 @@ wandb login --verify
 ```
 
 The bootstrap creates/updates the `rlad` Conda environment and prepares `miles` at commit
-`9437366e0` with the repository patch. It does not create the training container. Copy or build a
-compatible `miles.sqsh`, then verify `test -f "$RLAD_CONTAINER"`. All container-visible paths are
-under `/fsx`, which is mounted as `/fsx:/fsx`; home mounting remains disabled. Run the HF check
-after sourcing the profile because cached HF credentials live under its configured `HF_HOME`.
+`9437366e0` with the repository patch. The root setup command then imports and validates the
+training container if `$RLAD_CONTAINER` is missing. To use a pre-existing compatible image, place
+it at that path before setup; a user-provided image without a pipeline receipt is preserved. All
+container-visible paths are under `/fsx`, which is mounted as `/fsx:/fsx`; home mounting remains
+disabled. Run the HF check after sourcing the profile because cached HF credentials live under its
+configured `HF_HOME`.
 
 Always source `.env.cluster` in a new login shell. Submit single-node jobs through
 `jobs/sbatch.sh` and sharded GPU generation/evaluation through `rlad_inference_sbatch`; both apply

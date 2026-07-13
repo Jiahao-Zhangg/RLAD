@@ -35,7 +35,9 @@ cd ..
 
 `miles` runs in a container image (pyxis/enroot `.sqsh`, or your own) that provides Megatron-LM +
 SGLang and CUDA. Build/obtain that image per the `miles` README and point `RLAD_CONTAINER` at it
-(next step). The training `.sbatch` scripts launch `python train.py` inside this container.
+(next step). For the concrete P5 workflow, root `RFT_pipeline.sh setup` instead imports a pinned
+official Miles image through Pyxis, validates it on one H100, and saves the `.sqsh` automatically.
+The training `.sbatch` scripts launch `python train.py` inside this container.
 
 ### 1b. Host environment (for data preparation + evaluation)
 
@@ -62,6 +64,7 @@ source .env.cluster
 export RLAD_ACCOUNT=<your_slurm_account>       # omit when the site does not require an account
 export RLAD_PARTITION=<your_gpu_partition>
 export RLAD_CONTAINER=/path/to/miles.sqsh
+export RLAD_CONTAINER_SOURCE=docker.io#radixark/miles:dev-cu12-202606172131
 export RLAD_CONTAINER_MOUNTS=/shared:/shared   # e.g. /fsx:/fsx
 ```
 

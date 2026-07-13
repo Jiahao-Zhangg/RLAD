@@ -27,6 +27,9 @@ export RLAD_GPUS_PER_NODE="${RLAD_GPUS_PER_NODE:-8}"
 # Container paths must be visible on compute nodes. The /lustre default preserves
 # the reference-cluster behavior; FSx users should export /fsx:/fsx.
 export RLAD_CONTAINER="${RLAD_CONTAINER:-/path/to/miles_container.sqsh}"
+# Versioned CUDA-12 x86 image used only when RLAD_CONTAINER does not exist.
+# The dated tag avoids silently changing the training stack between runs.
+export RLAD_CONTAINER_SOURCE="${RLAD_CONTAINER_SOURCE:-docker.io#radixark/miles:dev-cu12-202606172131}"
 export RLAD_CONTAINER_MOUNTS="${RLAD_CONTAINER_MOUNTS:-/lustre:/lustre}"
 export RLAD_CONTAINER_MOUNT_HOME="${RLAD_CONTAINER_MOUNT_HOME:-0}"
 

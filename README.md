@@ -60,7 +60,7 @@ Everything needed is under **`train/rl/`** — see **[`train/rl/REPRODUCTION.md`
 for the full recipe (environment setup, dataset preparation, configs, run commands, and
 evaluation). For the original abstraction-generator SFT/RFT stages on an FSx-backed P5 Slurm
 cluster—including two-node inference/data generation, HF publication, and the DeepScaleR-hard
-five-metric W&B evaluation—run
+five-metric W&B evaluation—the setup command also imports the pinned Miles training container—run
 **[`RFT_pipeline.sh`](RFT_pipeline.sh)** or see
 **[`train/rl/P5_FSX.md`](train/rl/P5_FSX.md)**. Each version has its own training config:
 
