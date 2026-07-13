@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/cluster_env.sh"
+source "${RLAD_HOME:-$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/..}/jobs/cluster_env.sh"
 CONTAINER=${CONTAINER:-${RLAD_CONTAINER}}
 # LAUNCHER override lets SFT runs reuse this sbatch with the SFT launcher (jobs/sft_launch.sh).
 LAUNCHER=${LAUNCHER:-${RLAD_HOME}/jobs/launch_train.sh}

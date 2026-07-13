@@ -12,7 +12,7 @@
 # per curriculum problem from the RFT'd pi_abs, mixed with ~1/8 bare prompts (reward-masked).
 # Prereq for the RLAD solver DAPO. Host vllm env, 1 GPU.
 set -euo pipefail
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/cluster_env.sh"
+source "${RLAD_HOME:-$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/..}/jobs/cluster_env.sh"
 CODE=${RLAD_HOME}
 ABSGEN_HF=${ABSGEN_HF:-$(ls -d ${RLAD_RUNS}/sft_absgen_rft/hf/iter_* 2>/dev/null | sort -V | tail -1)}
 [[ -f "${ABSGEN_HF}/config.json" ]] || { echo "ERROR: no RFT pi_abs HF at ABSGEN_HF=${ABSGEN_HF}" >&2; exit 1; }

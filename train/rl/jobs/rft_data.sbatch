@@ -17,7 +17,7 @@
 # RFT_STAGE can pin one stage for the root RFT_pipeline.sh controller. Unlike the
 # legacy all-in-one mode, shard failures are propagated to Slurm.
 set -euo pipefail
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/cluster_env.sh"
+source "${RLAD_HOME:-$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/..}/jobs/cluster_env.sh"
 CODE=${RLAD_HOME}
 DATA=${RLAD_DATA}
 # miles exports HF per-iteration under hf/iter_N; resolve the LATEST as the warm-started pi_abs
