@@ -16,7 +16,7 @@
 #        (full):  rlad_inference_sbatch jobs/warmstart.sbatch
 
 set -euo pipefail
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/cluster_env.sh"
+source "${RLAD_HOME:-$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/..}/jobs/cluster_env.sh"
 CODE=${RLAD_HOME}
 rlad_activate_conda
 # (optional) source your own env file for API keys, e.g. NVIDIA_API_KEY / WANDB_API_KEY

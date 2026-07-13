@@ -19,7 +19,7 @@
 
 set -euo pipefail
 
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/cluster_env.sh"
+source "${RLAD_HOME:-$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/..}/jobs/cluster_env.sh"
 CODE=${RLAD_HOME}
 RUNS=${RLAD_RUNS}
 SELF=${RLAD_HOME}/jobs/prep_megatron_ckpt.sbatch

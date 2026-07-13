@@ -19,7 +19,7 @@
 
 set -euo pipefail
 
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/cluster_env.sh"
+source "${RLAD_HOME:-$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/..}/jobs/cluster_env.sh"
 CODE=${RLAD_HOME}
 SELF=${RLAD_HOME}/jobs/convert_hf.sbatch
 CONTAINER=${CONTAINER:-${RLAD_CONTAINER}}

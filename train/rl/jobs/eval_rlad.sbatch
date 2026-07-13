@@ -21,7 +21,7 @@
 # Submit (base w/abs):      SOLGEN_HF=Qwen/Qwen3-1.7B, OUT=.../eval/base_wabs
 
 set -euo pipefail
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/cluster_env.sh"
+source "${RLAD_HOME:-$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/..}/jobs/cluster_env.sh"
 CODE=${RLAD_HOME}
 : "${SOLGEN_HF:?set SOLGEN_HF (pi_sol HF dir or hub id)}"; : "${OUT:?set OUT}"
 # MODE=dual (default): gen-abs(pi_abs) -> solve(pi_sol w/o & w/abs) -> summarize (needs ABSGEN_HF).

@@ -14,7 +14,7 @@
 
 set -Eeuo pipefail
 
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/cluster_env.sh"
+source "${RLAD_HOME:-$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/..}/jobs/cluster_env.sh"
 
 SOURCE=${RLAD_CONTAINER_SOURCE:?set RLAD_CONTAINER_SOURCE to a Pyxis/Enroot image URI}
 OUT=${RLAD_CONTAINER:?set RLAD_CONTAINER to the output .sqsh path}

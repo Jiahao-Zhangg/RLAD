@@ -9,6 +9,9 @@ vllm==0.8.5.post1
 datasets>=2.19
 huggingface_hub>=0.30,<1.0
 math-verify
+# Required by miles' DeepScaleR rule-based grader (rm_hub/math_utils.py), which the
+# eval/scoring path imports; without it base/RFT scoring fails at grading time.
+pylatexenc
 pyarrow
 hf_transfer
 hf_xet
