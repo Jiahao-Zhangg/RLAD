@@ -8,8 +8,33 @@ export MILES_DIR="${MILES_DIR:-${RLAD_HOME}/miles}"    # clone radixark/miles he
 export RLAD_RUNS="${RLAD_RUNS:-${RLAD_HOME}/runs}"     # checkpoints, HF exports, eval outputs
 export RLAD_DATA="${RLAD_DATA:-${RLAD_HOME}/data}"     # prepared datasets
 export RLAD_LOGS="${RLAD_LOGS:-${RLAD_HOME}/logs}"
-# ---- cluster settings (EDIT these for your site, or export before submitting) ----
-export RLAD_ACCOUNT="${RLAD_ACCOUNT:-CHANGE_ME_slurm_account}"
-export RLAD_PARTITION="${RLAD_PARTITION:-CHANGE_ME_gpu_partition}"
-export RLAD_CONTAINER="${RLAD_CONTAINER:-/path/to/miles_container.sqsh}"   # pyxis/enroot image w/ miles deps (Megatron-LM + SGLang)
-export RLAD_CONDA_ENV="${RLAD_CONDA_ENV:-rlad}"       # host conda env for data-prep + eval (vllm, transformers, math-verify)
+
+# ---- cluster settings (export before submitting; see .env.cluster.example) ----
+# Scheduler options cannot be expanded inside #SBATCH directives. jobs/sbatch.sh
+# reads these values before submission and passes non-empty options to sbatch.
+export RLAD_ACCOUNT="${RLAD_ACCOUNT:-}"
+export RLAD_PARTITION="${RLAD_PARTITION:-}"
+export RLAD_SBATCH_CPUS_PER_TASK="${RLAD_SBATCH_CPUS_PER_TASK:-}"
+export RLAD_SBATCH_MEMORY="${RLAD_SBATCH_MEMORY:-}"
+export RLAD_SBATCH_TIME="${RLAD_SBATCH_TIME:-}"
+
+# Container paths must be visible on compute nodes. The /lustre default preserves
+# the reference-cluster behavior; FSx users should export /fsx:/fsx.
+export RLAD_CONTAINER="${RLAD_CONTAINER:-/path/to/miles_container.sqsh}"
+export RLAD_CONTAINER_MOUNTS="${RLAD_CONTAINER_MOUNTS:-/lustre:/lustre}"
+export RLAD_CONTAINER_MOUNT_HOME="${RLAD_CONTAINER_MOUNT_HOME:-0}"
+
+# Host environment for data preparation and vLLM evaluation/scoring.
+export CONDA_BASE="${CONDA_BASE:-$HOME/miniconda3}"
+export RLAD_CONDA_ENV="${RLAD_CONDA_ENV:-rlad}"
+export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+
+rlad_activate_conda() {
+   local conda_sh="${CONDA_BASE}/etc/profile.d/conda.sh"
+   if [[ ! -f "${conda_sh}" ]]; then
+      echo "ERROR: conda initialization script not found: ${conda_sh}" >&2
+      return 1
+   fi
+   source "${conda_sh}"
+   conda activate "${RLAD_CONDA_ENV}"
+}

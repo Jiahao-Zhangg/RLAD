@@ -1,7 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=rlad-convert-hf
-#SBATCH --account=CHANGE_ME_slurm_account
-#SBATCH --partition=CHANGE_ME_gpu_partition
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=8
@@ -9,6 +7,7 @@
 #SBATCH --exclusive
 #SBATCH --time=03:55:00
 #SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
 #
 # convert_hf.sbatch — OFFLINE Megatron torch_dist -> HF conversion (F001: in-training
 # --save-hf is unreliable under TP+CP; always use this offline path before eval).
@@ -16,7 +15,7 @@
 # per tracker) via tools/convert_torch_dist_to_hf.py (also strips vocab padding).
 #
 # Submit (baseline iter_100):
-#   sbatch --export=ALL,CKPT_DIR=$PWD/runs/dapo_baseline/ckpts,OUT_DIR=$PWD/runs/dapo_baseline/hf_iter100,ITER=100 jobs/convert_hf.sbatch
+#   jobs/sbatch.sh --export=ALL,CKPT_DIR=$PWD/runs/dapo_baseline/ckpts,OUT_DIR=$PWD/runs/dapo_baseline/hf_iter100,ITER=100 jobs/convert_hf.sbatch
 
 set -euo pipefail
 
@@ -56,10 +55,12 @@ if [[ ! -f "${CONTAINER}" ]]; then echo "ERROR: container missing: ${CONTAINER}"
 mkdir -p "${RLAD_LOGS}"
 echo "Convert ${CKPT_DIR} iter=${ITER:-latest} -> ${OUT_DIR}  (job ${SLURM_JOB_ID})"
 
+CONTAINER_ARGS=(--container-image="${CONTAINER}")
+[[ -n "${RLAD_CONTAINER_MOUNTS}" ]] && CONTAINER_ARGS+=(--container-mounts="${RLAD_CONTAINER_MOUNTS}")
+[[ "${RLAD_CONTAINER_MOUNT_HOME}" == "1" ]] || CONTAINER_ARGS+=(--no-container-mount-home)
+
 srun \
-    --container-image="${CONTAINER}" \
-    --container-mounts=/lustre:/lustre \
-    --no-container-mount-home \
+    "${CONTAINER_ARGS[@]}" \
     --no-container-entrypoint \
     --export=ALL,IN_CONTAINER=1,CKPT_DIR="${CKPT_DIR}",OUT_DIR="${OUT_DIR}",ITER="${ITER:-}" \
     --nodes=1 --ntasks=1 \

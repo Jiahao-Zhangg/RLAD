@@ -33,6 +33,18 @@ JOB_NAME=${3:-rlad-$(basename "${ARM_CONFIG}" .sh)}
 
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/cluster_env.sh"
 SBATCH_SCRIPT=${RLAD_HOME}/jobs/submit_train.sbatch
+SBATCH_COMMAND=${RLAD_SBATCH_COMMAND:-${RLAD_HOME}/jobs/sbatch.sh}
+
+# Normalize the SFT launcher before forwarding it into Slurm. This accepts the
+# documented basename while ensuring the in-container process receives a real path.
+if [[ -n "${LAUNCHER:-}" ]]; then
+    if [[ ! -f "${LAUNCHER}" && -f "${RLAD_HOME}/jobs/${LAUNCHER}" ]]; then
+        LAUNCHER="${RLAD_HOME}/jobs/${LAUNCHER}"
+    fi
+    LAUNCHER=$(readlink -f "${LAUNCHER}")
+    [[ -f "${LAUNCHER}" ]] || { echo "ERROR: launcher not found: ${LAUNCHER}" >&2; exit 1; }
+    export LAUNCHER
+fi
 
 if [[ ! -f "${ARM_CONFIG}" ]]; then
     echo "ERROR: ARM_CONFIG not found: ${ARM_CONFIG}" >&2
@@ -56,6 +68,7 @@ EXPORTS="ALL,ARM_CONFIG=${ARM_CONFIG}"
 [[ -n "${NUM_EPOCH:-}" ]]     && EXPORTS+=",NUM_EPOCH=${NUM_EPOCH}"
 [[ -n "${ROLLOUT_BATCH:-}" ]] && EXPORTS+=",ROLLOUT_BATCH=${ROLLOUT_BATCH}"
 [[ -n "${GLOBAL_BATCH:-}" ]]  && EXPORTS+=",GLOBAL_BATCH=${GLOBAL_BATCH}"
+[[ -n "${LAUNCHER:-}" ]]      && EXPORTS+=",LAUNCHER=${LAUNCHER}"
 
 echo "================================================================"
 echo "Singleton chain: ${N} segments of ${SBATCH_SCRIPT}"
@@ -66,7 +79,7 @@ echo "================================================================"
 
 JOB_IDS=()
 for i in $(seq 1 "${N}"); do
-    JID=$(sbatch --parsable \
+    JID=$("${SBATCH_COMMAND}" --parsable \
         --job-name="${JOB_NAME}" \
         --dependency=singleton \
         --export="${EXPORTS}" \

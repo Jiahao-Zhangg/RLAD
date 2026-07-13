@@ -25,7 +25,7 @@ CKPT_ARGS=(
 # NOTE: intentionally NO --save-hf (unlike common.sh). RFT is short (~38 steps) so an in-training
 # save-hf may never fire, and F001 flags it as unreliable anyway — export the final Megatron ckpt
 # via the offline path instead, which also yields a clean origin tokenizer (no extra_special_tokens bug):
-#   sbatch --export=ALL,CKPT_DIR=$PWD/runs/sft_absgen_rft/ckpts,OUT_DIR=$PWD/runs/sft_absgen_rft/hf/iter_<N>,ITER=<N> jobs/convert_hf.sbatch
+#   jobs/sbatch.sh --export=ALL,CKPT_DIR=$PWD/runs/sft_absgen_rft/ckpts,OUT_DIR=$PWD/runs/sft_absgen_rft/hf/iter_<N>,ITER=<N> jobs/convert_hf.sbatch
 
 SFT_ARGS=(
    --rollout-function-path miles.rollout.sft_rollout.generate_rollout
