@@ -14,7 +14,9 @@
 # so a 4h timeout just resumes. Score stage dominates (~118 GPU-h). Submit as a singleton chain:
 #   for i in $(seq 6); do jobs/sbatch.sh --job-name=rlad-rft-data --dependency=singleton jobs/rft_data.sbatch; done
 # Stages per segment: gen-abs (8-way, cheap) -> score (8-way, heavy, resumes) -> build-rft (when complete).
-set -uo pipefail
+# RFT_STAGE can pin one stage for the root RFT_pipeline.sh controller. Unlike the
+# legacy all-in-one mode, shard failures are propagated to Slurm.
+set -euo pipefail
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/cluster_env.sh"
 CODE=${RLAD_HOME}
 DATA=${RLAD_DATA}
@@ -23,13 +25,17 @@ ABSGEN_HF=${ABSGEN_HF:-$(ls -d ${RLAD_RUNS}/sft_absgen/hf/iter_* 2>/dev/null | s
 [[ -f "${ABSGEN_HF}/config.json" ]] || { echo "ERROR: no HF model_dir at ABSGEN_HF=${ABSGEN_HF}" >&2; exit 1; }
 NSHARDS=${NSHARDS:-8}
 NPROB=${NPROB:-1500}; K=${K:-4}; M=${M:-8}; MAXTOK=${MAXTOK:-16384}; MARGIN=${MARGIN:-0.0}
+RFT_STAGE=${RFT_STAGE:-all}
+case "${RFT_STAGE}" in
+  all|gen-abs|score|build-rft) ;;
+  *) echo "ERROR: invalid RFT_STAGE=${RFT_STAGE}" >&2; exit 2 ;;
+esac
 
 rlad_activate_conda
 # (optional) source your own env file for API keys, e.g. NVIDIA_API_KEY / WANDB_API_KEY
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 export PYTHONUNBUFFERED=1 PYTHONPATH=${CODE}
 mkdir -p "${RLAD_LOGS}"
-python "${CODE}/eval/trim_vocab_padding.py" "${ABSGEN_HF}" || true   # tokenizer/vocab fix for vLLM
 cd "${CODE}"
 
 run_shards () {   # $1 = stage name, $2... = extra args; launches one process per GPU
@@ -38,7 +44,7 @@ run_shards () {   # $1 = stage name, $2... = extra args; launches one process pe
   for s in $(seq 0 $((NSHARDS-1))); do
     CUDA_VISIBLE_DEVICES=$s python -m rlad_plugin.absgen_score "$stage" \
         --shard "$s" --num-shards "$NSHARDS" "$@" \
-        > "${RLAD_LOGS}/rftdata_${stage}_shard${s}.log" 2>&1 &
+        > "${RLAD_LOGS}/rftdata_${stage}_shard${s}_${SLURM_JOB_ID}.log" 2>&1 &
     pids+=($!)
   done
   local rc=0
@@ -46,14 +52,27 @@ run_shards () {   # $1 = stage name, $2... = extra args; launches one process pe
   return $rc
 }
 
-echo "=== gen-abs (pi_abs=${ABSGEN_HF}, ${NSHARDS}-way) ==="
-run_shards gen-abs --absgen-hf "${ABSGEN_HF}" --k "${K}" --n-problems "${NPROB}"
-echo "=== score (base pi_sol, ${NSHARDS}-way, M=${M}) ==="
-run_shards score --m "${M}" --max-tokens "${MAXTOK}"
+if [[ "${RFT_STAGE}" == all || "${RFT_STAGE}" == gen-abs ]]; then
+  echo "=== gen-abs (pi_abs=${ABSGEN_HF}, ${NSHARDS}-way) ==="
+  run_shards gen-abs --absgen-hf "${ABSGEN_HF}" --k "${K}" --n-problems "${NPROB}"
+  [[ "${RFT_STAGE}" == gen-abs ]] && { echo "gen-abs stage ${SLURM_JOB_ID} done"; exit 0; }
+fi
+
+if [[ "${RFT_STAGE}" == all || "${RFT_STAGE}" == score ]]; then
+  echo "=== score (base pi_sol, ${NSHARDS}-way, M=${M}) ==="
+  run_shards score --m "${M}" --max-tokens "${MAXTOK}"
+  [[ "${RFT_STAGE}" == score ]] && { echo "score stage ${SLURM_JOB_ID} done"; exit 0; }
+fi
+
+if [[ "${RFT_STAGE}" == build-rft ]]; then
+  python -m rlad_plugin.absgen_score build-rft --margin "${MARGIN}"
+  echo "build-rft stage ${SLURM_JOB_ID} done"
+  exit 0
+fi
 
 # build-rft only when every cached abstraction has been scored (idempotent; safe to re-run)
-N_ABS=$(cat ${DATA}/rft_abs_cache.shard*.jsonl ${DATA}/rft_abs_cache.jsonl 2>/dev/null | wc -l)
-N_SC=$(cat ${DATA}/rft_scored.shard*.jsonl ${DATA}/rft_scored.jsonl 2>/dev/null | wc -l)
+N_ABS=$(cat ${DATA}/rft_abs_cache.shard*.jsonl ${DATA}/rft_abs_cache.jsonl 2>/dev/null | wc -l || true)
+N_SC=$(cat ${DATA}/rft_scored.shard*.jsonl ${DATA}/rft_scored.jsonl 2>/dev/null | wc -l || true)
 echo "scored ${N_SC} / ${N_ABS} abstractions"
 if [[ "${N_ABS}" -gt 0 && "${N_SC}" -ge "${N_ABS}" ]]; then
   echo "=== build-rft (margin=${MARGIN}) ==="

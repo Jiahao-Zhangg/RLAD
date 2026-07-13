@@ -5,6 +5,32 @@ offline RFT. It assumes the repository is cloned at
 `/fsx/gstevenw/testing_alignment_algos/RLAD`, Slurm exposes eight GPUs with
 `--gpus-per-node=8`, and Pyxis/enroot accepts `--container-image`.
 
+## Automated controller
+
+From the repository root, the stateful controller performs the stages below, validates every
+handoff, and resumes recorded Slurm jobs without submitting duplicates:
+
+```bash
+cp train/rl/.env.cluster.example train/rl/.env.cluster
+chmod 600 train/rl/.env.cluster
+${EDITOR:-vi} train/rl/.env.cluster
+
+./RFT_pipeline.sh setup
+tmux new -s rlad-rft
+# Then, inside tmux:
+./RFT_pipeline.sh run
+```
+
+The controller remains in the foreground while GPU jobs run. If it is interrupted, the Slurm job
+is deliberately left alone; reconnect and run `./RFT_pipeline.sh resume`. Use
+`./RFT_pipeline.sh status` from another shell for a read-only summary. RFT caches are tied to the
+exact SFT checkpoint and sampling settings. For stale or corrupt RFT artifacts under the same
+settings, `./RFT_pipeline.sh archive-rft` moves RFT data and checkpoints aside instead of deleting
+them, and refuses to run while a related Slurm job is active. To change pipeline parameters or
+the repository commit, move both `train/rl/data` and `train/rl/runs` aside and start a fresh run.
+
+The manual commands below remain useful for inspection and recovery.
+
 ## One-time machine setup
 
 From `train/rl/`, create the private site profile and inspect every path before sourcing it:
@@ -54,7 +80,9 @@ jobs/sbatch.sh jobs/warmstart.sbatch
 ```
 
 The required output is `data/train_absgen_sft.jsonl`. `warmstart.sbatch` uses one GPU for the
-Qwen3-4B-Instruct teacher even though the full P5 node is allocated.
+Qwen3-4B-Instruct teacher even though the full P5 node is allocated. This generation is not
+incrementally resumable; increase `WARMSTART_TIME` if it cannot finish within the default
+`03:55:00`, then inspect the failed log before explicitly retrying.
 
 ## 2. Base checkpoint and SFT
 

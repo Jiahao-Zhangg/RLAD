@@ -47,6 +47,10 @@ if [[ "${IN_CONTAINER:-0}" == "1" ]]; then
         --vocab-size 151936 \
         --force
 
+    # Finalize the exact immutable directory consumed by vLLM before the
+    # controller fingerprints it. Downstream data jobs must not rewrite it.
+    python3 "${CODE}/eval/trim_vocab_padding.py" "${OUT_DIR}"
+
     echo "---- converted HF dir ----"; ls -la "${OUT_DIR}"
     exit 0
 fi

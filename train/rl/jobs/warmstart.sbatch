@@ -22,8 +22,18 @@ rlad_activate_conda
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 export PYTHONUNBUFFERED=1
 LIMIT=${LIMIT:-0}; K=${K:-2}
+GENERATOR=${GENERATOR:-Qwen/Qwen3-4B-Instruct-2507}
+GENERATOR_MAX_TOKENS=${GENERATOR_MAX_TOKENS:-4096}
+GENERATOR_TEMPERATURE=${GENERATOR_TEMPERATURE:-0.7}
+WARMSTART_ARGS=(
+    --k "${K}"
+    --limit "${LIMIT}"
+    --generator "${GENERATOR}"
+    --max-tokens "${GENERATOR_MAX_TOKENS}"
+    --temperature "${GENERATOR_TEMPERATURE}"
+)
+[[ -n "${OUT:-}" ]] && WARMSTART_ARGS+=(--out "${OUT}")
 cd "${CODE}"
 # single GPU (tp=1 in script); restrict to GPU 0 of the exclusive node
-CUDA_VISIBLE_DEVICES=0 python -m rlad_plugin.warmstart_gen --k "${K}" --limit "${LIMIT}" \
-    ${OUT:+--out "${OUT}"}
+CUDA_VISIBLE_DEVICES=0 python -m rlad_plugin.warmstart_gen "${WARMSTART_ARGS[@]}"
 echo "warmstart job ${SLURM_JOB_ID} done."

@@ -18,9 +18,9 @@ SFT_ARGS=(
    --loss-mask-type qwen3                             # mask loss to the assistant (cheatsheet) turn
    # rollout_global_dataset defaults True (flag is --disable-...); needed by sft_rollout+num-epoch, do NOT pass it
    --rollout-shuffle
-   --num-epoch 5
-   --rollout-batch-size 128
-   --global-batch-size 128
+   --num-epoch ${SFT_EPOCHS:-5}
+   --rollout-batch-size ${SFT_BATCH:-128}
+   --global-batch-size ${SFT_BATCH:-128}
    --loss-type sft_loss
    --calculate-per-token-loss
    --disable-compute-advantages-and-returns

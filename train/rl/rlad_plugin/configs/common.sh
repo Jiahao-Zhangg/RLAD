@@ -97,6 +97,5 @@ if [[ -n "${WANDB_API_KEY:-}" ]]; then
       --use-wandb
       --wandb-project repro-paper003-rlad
       --wandb-group "${ARM}"
-      --wandb-key "${WANDB_API_KEY}"
    )
 fi

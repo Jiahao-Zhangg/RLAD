@@ -9,7 +9,9 @@
 
 pkill -9 sglang; sleep 3; ray stop --force; pkill -9 ray; pkill -9 python; sleep 3; pkill -9 ray; pkill -9 python
 
-set -ex
+# Do not enable xtrace here: the runtime environment and W&B arguments contain
+# credentials that must never be copied into Slurm logs.
+set -e
 : "${ARM_CONFIG:?sft_launch.sh requires ARM_CONFIG}"
 [[ -f "${ARM_CONFIG}" ]] || { echo "ERROR: ARM_CONFIG not found: ${ARM_CONFIG}" >&2; exit 1; }
 
@@ -18,7 +20,17 @@ export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 export PYTHONUNBUFFERED=1
 source "${ARM_CONFIG}"
 
-[[ -f "${SFT_ARGS[3]}" ]] || true  # prompt-data presence is checked by the config comment
+PROMPT_DATA_PATH=""
+for ((i=0; i<${#SFT_ARGS[@]}; i++)); do
+   if [[ "${SFT_ARGS[i]}" == "--prompt-data" && $((i + 1)) -lt ${#SFT_ARGS[@]} ]]; then
+      PROMPT_DATA_PATH=${SFT_ARGS[i + 1]}
+      break
+   fi
+done
+[[ -n "${PROMPT_DATA_PATH}" && -s "${PROMPT_DATA_PATH}" ]] || {
+   echo "ERROR: SFT prompt data missing or empty: ${PROMPT_DATA_PATH:-<not configured>}" >&2
+   exit 1
+}
 [[ -f "${RUNS}/qwen3_1p7b_torch_dist/latest_checkpointed_iteration.txt" ]] || {
    echo "ERROR: base torch_dist ckpt missing — run prep_megatron_ckpt.sbatch first" >&2; exit 1; }
 

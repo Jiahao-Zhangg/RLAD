@@ -12,8 +12,9 @@ _CFG_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 source "${_CFG_DIR}/common.sh"
 
 # Init from the SFT-warmstarted pi_abs (override common's base --hf-checkpoint); fresh dirs.
-# miles exports HF per-iteration under hf/iter_N — resolve the LATEST (not the parent dir).
-SFT_ABSGEN_HF=$(ls -d ${RUNS}/sft_absgen/hf/iter_* 2>/dev/null | sort -V | tail -1)
+# The pipeline pins the exact offline-converted checkpoint that produced the RFT
+# scores. Manual runs retain the latest-iteration fallback.
+SFT_ABSGEN_HF=${SFT_ABSGEN_HF:-$(ls -d ${RUNS}/sft_absgen/hf/iter_* 2>/dev/null | sort -V | tail -1)}
 [[ -f "${SFT_ABSGEN_HF}/config.json" ]] || { echo "ERROR: no SFT pi_abs HF at ${SFT_ABSGEN_HF}" >&2; exit 1; }
 CKPT_ARGS=(
    --hf-checkpoint ${SFT_ABSGEN_HF}
@@ -34,8 +35,8 @@ SFT_ARGS=(
    --loss-mask-type qwen3
    --rollout-shuffle
    --num-epoch ${RFT_EPOCHS:-3}                       # RFT epochs (A-rft; paper unspecified)
-   --rollout-batch-size 128
-   --global-batch-size 128
+   --rollout-batch-size ${SFT_BATCH:-128}
+   --global-batch-size ${SFT_BATCH:-128}
    --loss-type sft_loss
    --calculate-per-token-loss
    --disable-compute-advantages-and-returns
