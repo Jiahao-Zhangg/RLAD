@@ -203,6 +203,40 @@ class EvalIntegrityTest(unittest.TestCase):
         self.assertEqual(set(complete), {"p1"})
         self.assertEqual({row["id"] for row in eval_rlad._read(out / "abstractions.jsonl")}, {"p1"})
 
+    def test_sharded_abstractions_merge_and_repair_independently(self) -> None:
+        out = self.root / "sharded-abs"
+        write_jsonl(
+            out / "abstractions.shard0.jsonl",
+            [
+                {"id": "p1", "abs_idx": idx, "abstraction": f"p1-{idx}"}
+                for idx in range(2)
+            ],
+        )
+        write_jsonl(
+            out / "abstractions.shard1.jsonl",
+            [{"id": "p2", "abs_idx": 0, "abstraction": "interrupted"}],
+        )
+        complete = eval_rlad._abstractions(
+            out, "dsr_hard", 2, repair=True, shard=1, num_shards=2
+        )
+        self.assertEqual(complete, {})
+        self.assertEqual(eval_rlad._read(out / "abstractions.shard1.jsonl"), [])
+        write_jsonl(
+            out / "abstractions.shard1.jsonl",
+            [
+                {"id": "p2", "abs_idx": idx, "abstraction": f"p2-{idx}"}
+                for idx in range(2)
+            ],
+        )
+        combined = eval_rlad._abstractions(
+            out, "dsr_hard", 2, require_complete=True
+        )
+        self.assertEqual(set(combined), {"p1", "p2"})
+
+        write_jsonl(out / "abstractions.jsonl", [])
+        with self.assertRaises(SystemExit):
+            eval_rlad._abstractions(out, "dsr_hard", 2, require_complete=True)
+
 
 if __name__ == "__main__":
     unittest.main()

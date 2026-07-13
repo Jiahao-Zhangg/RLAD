@@ -80,6 +80,20 @@ def _solve_path(out, shard, num_shards):
     return out / ("solve_samples.jsonl" if num_shards <= 1 else f"solve_samples.shard{shard}.jsonl")
 
 
+def _abstraction_paths(out):
+    out = Path(out)
+    single = sorted(out.glob("abstractions.jsonl"))
+    shards = sorted(out.glob("abstractions.shard*.jsonl"))
+    if single and shards:
+        raise SystemExit(f"mixed sharded and unsharded abstraction outputs under {out}")
+    return single + shards
+
+
+def _abstraction_path(out, shard, num_shards):
+    out = Path(out)
+    return out / ("abstractions.jsonl" if num_shards <= 1 else f"abstractions.shard{shard}.jsonl")
+
+
 def _load_problems(bench):
     p = BENCH_DIR / f"{bench}.jsonl"
     if not p.exists():
@@ -105,18 +119,32 @@ def _atomic_jsonl(path, rows):
     tmp.replace(path)
 
 
-def _abstractions(out, benchmark, k, *, repair=False, require_complete=False):
+def _abstractions(
+    out, benchmark, k, *, repair=False, require_complete=False, shard=None, num_shards=1
+):
     """Return id -> abs_idx -> text, optionally dropping interrupted per-id groups."""
-    path = Path(out) / "abstractions.jsonl"
     problems = _load_problems(benchmark)
+    if shard is not None:
+        if num_shards < 1 or not 0 <= shard < num_shards:
+            raise SystemExit("invalid abstraction shard configuration")
+        problems = [problem for index, problem in enumerate(problems) if index % num_shards == shard]
+        target_path = _abstraction_path(out, shard, num_shards)
+        paths = [target_path]
+    else:
+        paths = _abstraction_paths(out)
+        target_path = (paths[0] if paths else Path(out) / "abstractions.jsonl") if repair else None
+        if repair and len(paths) > 1:
+            raise SystemExit("repairing abstractions requires a specific shard")
     valid_ids = {problem["id"] for problem in problems}
-    rows_in_file = _read(path, repair_trailing=repair)
+    rows_in_file = []
+    for path in paths:
+        rows_in_file.extend(_read(path, repair_trailing=repair and path == target_path))
     grouped = defaultdict(list)
     bad_ids = set()
     for row in rows_in_file:
         pid, idx, text = row.get("id"), row.get("abs_idx"), row.get("abstraction")
         if pid not in valid_ids or not isinstance(idx, int) or not 0 <= idx < k or not isinstance(text, str) or not text.strip():
-            raise SystemExit(f"malformed abstraction row under {path}: {row}")
+            raise SystemExit(f"malformed abstraction row under {out}: {row}")
         if any(existing["abs_idx"] == idx for existing in grouped[pid]):
             bad_ids.add(pid)
         grouped[pid].append(row)
@@ -134,7 +162,7 @@ def _abstractions(out, benchmark, k, *, repair=False, require_complete=False):
 
     if repair and bad_ids:
         kept = [row for row in rows_in_file if row["id"] in complete]
-        _atomic_jsonl(path, kept)
+        _atomic_jsonl(target_path, kept)
         print(f"gen-abs: removed interrupted abstraction groups for {len(bad_ids)} problem(s)")
     elif bad_ids:
         raise SystemExit(f"incomplete or duplicate abstraction groups for {len(bad_ids)} problem(s)")
@@ -175,12 +203,23 @@ def stage_gen_abs(args):
     from vllm import LLM, SamplingParams
     from rlad_plugin.templates import render_absgen_prompt
 
+    if args.num_shards < 1 or not 0 <= args.shard < args.num_shards:
+        raise SystemExit("--num-shards must be positive and --shard must be in range")
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
-    abs_path = out / "abstractions.jsonl"
-    problems = _load_problems(args.benchmark)
-    done = set(_abstractions(args.out, args.benchmark, args.k, repair=True))
+    abs_path = _abstraction_path(out, args.shard, args.num_shards)
+    problems = [
+        problem for index, problem in enumerate(_load_problems(args.benchmark))
+        if index % args.num_shards == args.shard
+    ]
+    done = set(_abstractions(
+        args.out, args.benchmark, args.k, repair=True,
+        shard=args.shard, num_shards=args.num_shards,
+    ))
     todo = [p for p in problems if p["id"] not in done]
-    print(f"gen-abs: {len(problems)} problems, {len(done)} done, {len(todo)} to do")
+    print(
+        f"gen-abs[shard {args.shard}/{args.num_shards}]: {len(problems)} problems, "
+        f"{len(done)} done, {len(todo)} to do"
+    )
     if not todo:
         return
     tok = AutoTokenizer.from_pretrained(args.absgen_hf, trust_remote_code=True)
@@ -209,7 +248,10 @@ def stage_gen_abs(args):
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
             handle.flush()
         print(f"  gen-abs: +{len(chunk)} problems [{i + len(chunk)}/{len(todo)}]")
-    _abstractions(args.out, args.benchmark, args.k, require_complete=True)
+    _abstractions(
+        args.out, args.benchmark, args.k, require_complete=True,
+        shard=args.shard, num_shards=args.num_shards,
+    )
     print(f"gen-abs -> {abs_path}")
 
 
@@ -506,6 +548,7 @@ def main():
     g = sub.add_parser("gen-abs"); common(g); g.add_argument("--absgen-hf", required=True)
     g.add_argument("--k", type=int, default=4); g.add_argument("--abs-max-tokens", type=int, default=1024)
     g.add_argument("--chunk", type=int, default=8)
+    g.add_argument("--shard", type=int, default=0); g.add_argument("--num-shards", type=int, default=1)
     def solve_args(q):
         q.add_argument("--solgen-hf", required=True)
         q.add_argument("--n", type=int, default=32); q.add_argument("--k", type=int, default=4)

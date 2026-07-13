@@ -18,6 +18,12 @@ export RLAD_SBATCH_CPUS_PER_TASK="${RLAD_SBATCH_CPUS_PER_TASK:-}"
 export RLAD_SBATCH_MEMORY="${RLAD_SBATCH_MEMORY:-}"
 export RLAD_SBATCH_TIME="${RLAD_SBATCH_TIME:-}"
 
+# Host-side vLLM/data-generation jobs can span several nodes. Training jobs do
+# not consume these values and remain single-node.
+export RLAD_INFERENCE_NODES="${RLAD_INFERENCE_NODES:-1}"
+export RLAD_INFERENCE_NODELIST="${RLAD_INFERENCE_NODELIST:-}"
+export RLAD_GPUS_PER_NODE="${RLAD_GPUS_PER_NODE:-8}"
+
 # Container paths must be visible on compute nodes. The /lustre default preserves
 # the reference-cluster behavior; FSx users should export /fsx:/fsx.
 export RLAD_CONTAINER="${RLAD_CONTAINER:-/path/to/miles_container.sqsh}"
@@ -37,4 +43,16 @@ rlad_activate_conda() {
    fi
    source "${conda_sh}"
    conda activate "${RLAD_CONDA_ENV}"
+}
+
+rlad_inference_sbatch() {
+   local args=(
+      --nodes="${RLAD_INFERENCE_NODES}"
+      --ntasks="${RLAD_INFERENCE_NODES}"
+      --ntasks-per-node=1
+      --gpus-per-node="${RLAD_GPUS_PER_NODE}"
+   )
+   [[ -z "${RLAD_INFERENCE_NODELIST}" ]] ||
+      args+=(--nodelist="${RLAD_INFERENCE_NODELIST}")
+   "${RLAD_HOME}/jobs/sbatch.sh" "${args[@]}" "$@"
 }

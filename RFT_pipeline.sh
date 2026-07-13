@@ -15,7 +15,7 @@ POOL_SEED=${POOL_SEED:-42}
 BASE_MODEL=${BASE_MODEL:-Qwen/Qwen3-1.7B}
 BASE_SAMPLES=${BASE_SAMPLES:-8}
 BASE_MAX_TOKENS=${BASE_MAX_TOKENS:-8192}
-NSHARDS=${NSHARDS:-8}
+NSHARDS=${NSHARDS:-16}
 HARD_MAX=${HARD_MAX:-0.125}
 EASY_MIN=${EASY_MIN:-0.5}
 SFT_K=${SFT_K:-2}
@@ -51,6 +51,12 @@ WANDB_PROJECT=${WANDB_PROJECT:-repro-paper003-rlad}
 WANDB_ENTITY=${WANDB_ENTITY:-}
 WANDB_EVAL_GROUP=${WANDB_EVAL_GROUP:-absgen-rft-eval}
 
+# Site defaults for non-training GPU stages. The ignored cluster profile can
+# override them with direct exports; training and conversion remain one-node.
+RLAD_INFERENCE_NODES=${RLAD_INFERENCE_NODES:-2}
+RLAD_INFERENCE_NODELIST=${RLAD_INFERENCE_NODELIST:-ip-10-1-81-8,ip-10-1-38-11}
+RLAD_GPUS_PER_NODE=${RLAD_GPUS_PER_NODE:-8}
+
 POLL_SECONDS=${POLL_SECONDS:-60}
 BASE_EVAL_ATTEMPTS=${BASE_EVAL_ATTEMPTS:-6}
 BASE_CKPT_ATTEMPTS=${BASE_CKPT_ATTEMPTS:-2}
@@ -71,6 +77,7 @@ SBATCH_COMMAND=${RLAD_SBATCH_COMMAND:-${RL_DIR}/jobs/sbatch.sh}
 STATE_DIR=""
 PIPELINE_ID=""
 ACTIVE_JOB=""
+INFERENCE_SBATCH_ARGS=()
 
 log() { printf '[%(%Y-%m-%dT%H:%M:%SZ)T] %s\n' -1 "$*" >&2; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
@@ -99,8 +106,9 @@ Recommended on the target machine:
 
 The controller submits one Slurm stage at a time and waits for it. After training it publishes
 the SFT/RFT corpora and checkpoints to private HF repositories, then evaluates the untrained
-and RFT abstraction generators on DeepScaleR-hard and logs five metrics to W&B. Ctrl-C stops
-only the controller; it never cancels a running Slurm job. Rerun `resume` to reconnect.
+and RFT abstraction generators on DeepScaleR-hard and logs five metrics to W&B. Non-training
+GPU stages use the two configured inference nodes (16 global shards); training stays one-node.
+Ctrl-C stops only the controller; it never cancels a running Slurm job. Rerun `resume` to reconnect.
 After fixing a non-retryable training failure, explicitly use
 `RLAD_RETRY_FAILED=1 ./RFT_pipeline.sh resume` to authorize another segment.
 State and logs are kept under train/rl/runs/rft_pipeline and train/rl/logs.
@@ -137,6 +145,15 @@ load_profile() {
     SCONTROL_BIN=${RLAD_SCONTROL_BIN:-scontrol}
     SINFO_BIN=${RLAD_SINFO_BIN:-sinfo}
     SBATCH_COMMAND=${RLAD_SBATCH_COMMAND:-${RL_DIR}/jobs/sbatch.sh}
+    export RLAD_INFERENCE_NODES RLAD_INFERENCE_NODELIST RLAD_GPUS_PER_NODE
+    INFERENCE_SBATCH_ARGS=(
+        --nodes="${RLAD_INFERENCE_NODES}"
+        --ntasks="${RLAD_INFERENCE_NODES}"
+        --ntasks-per-node=1
+        --gpus-per-node="${RLAD_GPUS_PER_NODE}"
+    )
+    [[ -z "${RLAD_INFERENCE_NODELIST}" ]] ||
+        INFERENCE_SBATCH_ARGS+=(--nodelist="${RLAD_INFERENCE_NODELIST}")
 
     [[ "$(readlink -f -- "${RLAD_HOME}")" == "$(readlink -f -- "${RL_DIR}")" ]] ||
         die "RLAD_HOME=${RLAD_HOME} does not point to this checkout (${RL_DIR})"
@@ -166,7 +183,8 @@ mounted_path() {
 }
 
 doctor() {
-    local failures=0 path value
+    local failures=0 path value expected_shards node seen_nodes=,
+    local -a inference_nodes=()
     for path in "${CONDA_BASE}/etc/profile.d/conda.sh" "${RLAD_CONTAINER}"; do
         if [[ ! -s "${path}" || ! -r "${path}" ]]; then
             warn "missing or empty: ${path}"
@@ -198,7 +216,8 @@ doctor() {
     fi
     for path in POOL_SIZE POOL_SEED BASE_SAMPLES BASE_MAX_TOKENS NSHARDS SFT_K SFT_EPOCHS \
         RFT_NPROB RFT_K RFT_M RFT_MAXTOK RFT_EPOCHS TRAIN_BATCH RFT_MIN_ROWS \
-        EVAL_K EVAL_N EVAL_MAX_TOKENS EVAL_ABS_MAX_TOKENS EVAL_SEED EVAL_CHUNK EVAL_SEGMENTS; do
+        EVAL_K EVAL_N EVAL_MAX_TOKENS EVAL_ABS_MAX_TOKENS EVAL_SEED EVAL_CHUNK EVAL_SEGMENTS \
+        RLAD_INFERENCE_NODES RLAD_GPUS_PER_NODE; do
         value=${!path}
         if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
             warn "${path} must be a nonnegative integer (got ${value})"
@@ -207,17 +226,39 @@ doctor() {
     done
     for path in POOL_SIZE BASE_SAMPLES BASE_MAX_TOKENS NSHARDS SFT_K SFT_EPOCHS \
         RFT_NPROB RFT_K RFT_M RFT_MAXTOK RFT_EPOCHS TRAIN_BATCH RFT_MIN_ROWS \
-        EVAL_K EVAL_N EVAL_MAX_TOKENS EVAL_ABS_MAX_TOKENS EVAL_CHUNK EVAL_SEGMENTS; do
+        EVAL_K EVAL_N EVAL_MAX_TOKENS EVAL_ABS_MAX_TOKENS EVAL_CHUNK EVAL_SEGMENTS \
+        RLAD_INFERENCE_NODES RLAD_GPUS_PER_NODE; do
         value=${!path}
         if [[ "${value}" =~ ^[0-9]+$ ]] && (( value < 1 )); then
             warn "${path} must be greater than zero"
             failures=1
         fi
     done
-    if [[ "${NSHARDS}" =~ ^[0-9]+$ ]] && (( NSHARDS < 1 || NSHARDS > 8 )); then
-        warn "NSHARDS must be between 1 and the allocated 8 GPUs"
+    if [[ "${RLAD_INFERENCE_NODES}" =~ ^[1-9][0-9]*$ &&
+          "${RLAD_GPUS_PER_NODE}" =~ ^[1-9][0-9]*$ && "${NSHARDS}" =~ ^[1-9][0-9]*$ ]]; then
+        expected_shards=$((RLAD_INFERENCE_NODES * RLAD_GPUS_PER_NODE))
+        if (( NSHARDS != expected_shards )); then
+            warn "NSHARDS must equal RLAD_INFERENCE_NODES x RLAD_GPUS_PER_NODE (${expected_shards})"
+            failures=1
+        fi
+    fi
+    IFS=',' read -ra inference_nodes <<< "${RLAD_INFERENCE_NODELIST}"
+    if [[ -n "${RLAD_INFERENCE_NODELIST}" &&
+          "${RLAD_INFERENCE_NODES}" =~ ^[1-9][0-9]*$ ]] &&
+       ((${#inference_nodes[@]} != RLAD_INFERENCE_NODES)); then
+        warn "RLAD_INFERENCE_NODELIST must contain exactly ${RLAD_INFERENCE_NODES} comma-separated nodes"
         failures=1
     fi
+    for node in "${inference_nodes[@]}"; do
+        if [[ ! "${node}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            warn "invalid node name in RLAD_INFERENCE_NODELIST: ${node}"
+            failures=1
+        elif [[ "${seen_nodes}" == *",${node},"* ]]; then
+            warn "duplicate node in RLAD_INFERENCE_NODELIST: ${node}"
+            failures=1
+        fi
+        seen_nodes+="${node},"
+    done
     if [[ ! "${EVAL_BENCHMARK}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
         warn "EVAL_BENCHMARK contains unsupported characters: ${EVAL_BENCHMARK}"
         failures=1
@@ -251,6 +292,15 @@ PY
          ! "${SINFO_BIN}" -h -p "${RLAD_PARTITION}" -o '%P' 2>/dev/null | grep -q .; then
         warn "partition was not visible through sinfo: ${RLAD_PARTITION}"
         failures=1
+    fi
+    if command -v "${SINFO_BIN}" >/dev/null 2>&1 && [[ -n "${RLAD_PARTITION:-}" ]]; then
+        for node in "${inference_nodes[@]}"; do
+            "${SINFO_BIN}" -h -N -p "${RLAD_PARTITION}" -n "${node}" -o '%N' 2>/dev/null |
+                grep -Fxq "${node}" || {
+                    warn "inference node ${node} is not visible in partition ${RLAD_PARTITION}"
+                    failures=1
+                }
+        done
     fi
 
     if [[ -d "${MILES_DIR}/.git" ]]; then
@@ -346,6 +396,9 @@ pool_seed=${POOL_SEED}
 base_samples=${BASE_SAMPLES}
 base_max_tokens=${BASE_MAX_TOKENS}
 nshards=${NSHARDS}
+inference_nodes=${RLAD_INFERENCE_NODES}
+inference_nodelist=${RLAD_INFERENCE_NODELIST}
+gpus_per_node=${RLAD_GPUS_PER_NODE}
 hard_max=${HARD_MAX}
 easy_min=${EASY_MIN}
 sft_k=${SFT_K}
@@ -622,9 +675,9 @@ PY
 }
 
 warmstart_complete() {
-    python3 - "${RLAD_DATA}" "${SFT_K}" "${WARMSTART_MODEL}" <<'PY' >/dev/null 2>&1
+    python3 - "${RLAD_DATA}" "${SFT_K}" "${WARMSTART_MODEL}" "${NSHARDS}" <<'PY' >/dev/null 2>&1
 import json, os, sys
-d, k, generator = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+d, k, generator, num_shards = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4])
 def read(name):
     return [json.loads(x) for x in open(os.path.join(d, name), encoding="utf-8") if x.strip()]
 try:
@@ -636,6 +689,7 @@ except (OSError, ValueError):
 qids = {r["metadata"]["qid"] for r in curriculum}
 assert rows and meta.get("n_problems") == len(qids) and meta.get("k") == k
 assert meta.get("kept") == len(rows) and meta.get("generator") == generator
+assert meta.get("num_shards") == num_shards
 for row in rows:
     assert row.get("metadata", {}).get("qid") in qids
     msgs = row.get("messages"); assert isinstance(msgs, list) and len(msgs) == 2
@@ -878,6 +932,7 @@ run_base_stages() {
         progress=$(base_score_progress)
         log "Base-score progress: ${progress}/$((POOL_SIZE * BASE_SAMPLES)) rows"
         jid=$(submit_stage base_eval "${PIPELINE_ID}-basescore" \
+            "${INFERENCE_SBATCH_ARGS[@]}" \
             --export="ALL,MODEL_PATH=${BASE_MODEL},BENCHMARKS=dsr_pool,N_SAMPLES=${BASE_SAMPLES},MAX_TOKENS=${BASE_MAX_TOKENS},NUM_SHARDS=${NSHARDS},OUT_DIR=${RLAD_RUNS}/eval/dsr_pool_score" \
             "${RL_DIR}/jobs/eval.sbatch")
         if ! wait_for_job "${jid}" base_eval; then
@@ -916,8 +971,9 @@ run_warmstart() {
     warmstart_complete && return
     for attempt in $(seq 1 "${WARMSTART_ATTEMPTS}"); do
         jid=$(submit_stage warmstart "${PIPELINE_ID}-warmstart" \
+            "${INFERENCE_SBATCH_ARGS[@]}" \
             --time="${WARMSTART_TIME}" \
-            --export="ALL,LIMIT=0,K=${SFT_K},GENERATOR=${WARMSTART_MODEL},GENERATOR_MAX_TOKENS=${WARMSTART_MAX_TOKENS},GENERATOR_TEMPERATURE=${WARMSTART_TEMPERATURE},OUT=${RLAD_DATA}/train_absgen_sft.jsonl" \
+            --export="ALL,LIMIT=0,K=${SFT_K},NSHARDS=${NSHARDS},GENERATOR=${WARMSTART_MODEL},GENERATOR_MAX_TOKENS=${WARMSTART_MAX_TOKENS},GENERATOR_TEMPERATURE=${WARMSTART_TEMPERATURE},OUT=${RLAD_DATA}/train_absgen_sft.jsonl" \
             "${RL_DIR}/jobs/warmstart.sbatch")
         if wait_for_job "${jid}" warmstart && warmstart_complete; then return; fi
     done
@@ -1052,6 +1108,7 @@ run_rft_data() {
     if ! rft_generation_complete; then
         for attempt in $(seq 1 "${RFT_GEN_ATTEMPTS}"); do
             jid=$(submit_stage rft_gen "${PIPELINE_ID}-rftgen" \
+                "${INFERENCE_SBATCH_ARGS[@]}" \
                 --export="ALL,RFT_STAGE=gen-abs,ABSGEN_HF=${sft_hf},NSHARDS=${NSHARDS},NPROB=${RFT_NPROB},K=${RFT_K},M=${RFT_M},MAXTOK=${RFT_MAXTOK},MARGIN=${RFT_MARGIN}" \
                 "${RL_DIR}/jobs/rft_data.sbatch")
             if wait_for_job "${jid}" rft_gen && validate_rft gen; then
@@ -1086,6 +1143,7 @@ PY
 )
         log "RFT-score progress: ${progress} unique abstractions"
         jid=$(submit_stage rft_score "${PIPELINE_ID}-rftscore" \
+            "${INFERENCE_SBATCH_ARGS[@]}" \
             --export="ALL,RFT_STAGE=score,ABSGEN_HF=${sft_hf},NSHARDS=${NSHARDS},NPROB=${RFT_NPROB},K=${RFT_K},M=${RFT_M},MAXTOK=${RFT_MAXTOK},MARGIN=${RFT_MARGIN}" \
             "${RL_DIR}/jobs/rft_data.sbatch")
         if ! wait_for_job "${jid}" rft_score; then
@@ -1160,13 +1218,14 @@ eval_progress() {
     python3 - "$1" <<'PY'
 import glob, json, os, sys
 abstractions, samples = set(), set()
-try:
-    for line in open(os.path.join(sys.argv[1], "abstractions.jsonl"), encoding="utf-8"):
-        if line.strip():
-            row = json.loads(line)
-            abstractions.add((row["id"], int(row["abs_idx"])))
-except (OSError, ValueError, KeyError):
-    pass
+for path in glob.glob(os.path.join(sys.argv[1], "abstractions*.jsonl")):
+    try:
+        for line in open(path, encoding="utf-8"):
+            if line.strip():
+                row = json.loads(line)
+                abstractions.add((row["id"], int(row["abs_idx"])))
+    except (OSError, ValueError, KeyError):
+        pass
 for path in glob.glob(os.path.join(sys.argv[1], "solve_samples*.jsonl")):
     try:
         for line in open(path, encoding="utf-8"):
@@ -1188,6 +1247,7 @@ run_eval_variant() {
         before=$(eval_progress "${out}")
         log "${label} abstraction evaluation progress: ${before}"
         jid=$(submit_stage "${stage}" "${PIPELINE_ID}-e${label:0:1}-${key_short:0:6}" \
+            "${INFERENCE_SBATCH_ARGS[@]}" \
             --export="ALL,MODE=dual,ABSGEN_HF=${absgen},SOLGEN_HF=${BASE_MODEL},OUT=${out},BENCHMARK=${EVAL_BENCHMARK},N=${EVAL_N},K=${EVAL_K},MAX_TOKENS=${EVAL_MAX_TOKENS},ABS_MAX_TOKENS=${EVAL_ABS_MAX_TOKENS},TEMPERATURE=${EVAL_TEMPERATURE},TOP_P=${EVAL_TOP_P},SEED=${EVAL_SEED},CHUNK=${EVAL_CHUNK},NSHARDS=${NSHARDS},SKIP_WOABS=${skip_woabs},CACHE_ROOT=${HF_HOME}/rlad_compile" \
             "${RL_DIR}/jobs/eval_rlad.sbatch")
         if wait_for_job "${jid}" "${stage}"; then
@@ -1237,7 +1297,8 @@ run_absgen_evaluation() {
     [[ -s "${benchmark_file}" ]] || die "evaluation benchmark is missing or empty: ${benchmark_file}"
     raw_key=$(printf '%s|%s' \
         "$(files_digest "${benchmark_file}" "${STATE_DIR}/sft_absgen_rft.hf.complete" \
-            "${RL_DIR}/eval/eval_rlad.py" "${RL_DIR}/jobs/eval_rlad.sbatch")" \
+            "${RL_DIR}/eval/eval_rlad.py" "${RL_DIR}/jobs/eval_rlad.sbatch" \
+            "${RL_DIR}/jobs/run_gpu_shards.sh")" \
         "base=${BASE_MODEL}|benchmark=${EVAL_BENCHMARK}|k=${EVAL_K}|n=${EVAL_N}|max=${EVAL_MAX_TOKENS}|absmax=${EVAL_ABS_MAX_TOKENS}|temp=${EVAL_TEMPERATURE}|top_p=${EVAL_TOP_P}|seed=${EVAL_SEED}|chunk=${EVAL_CHUNK}|shards=${NSHARDS}" |
         sha256sum | awk '{print $1}')
     short=${raw_key:0:16}
@@ -1314,6 +1375,8 @@ show_status() {
     printf 'Pipeline: %s\n' "${PIPELINE_ID}"
     printf 'Profile:  %s\n' "${PROFILE}"
     printf 'State:    %s\n' "${STATE_DIR}"
+    printf 'Inference: %s shards on %s node(s): %s\n' \
+        "${NSHARDS}" "${RLAD_INFERENCE_NODES}" "${RLAD_INFERENCE_NODELIST}"
     stage_status 'curriculum pool' pool_complete
     stage_status 'base scores' base_scores_complete
     stage_status 'base checkpoint' base_checkpoint_complete

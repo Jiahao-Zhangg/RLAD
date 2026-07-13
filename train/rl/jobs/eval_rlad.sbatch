@@ -16,7 +16,7 @@
 # (A-eval-absgen). Resumable: resubmit (singleton) to continue a timed-out solve.
 #
 # Submit (RLAD):
-#   jobs/sbatch.sh --export=ALL,ABSGEN_HF=$PWD/runs/sft_absgen_rft/hf,SOLGEN_HF=$PWD/runs/dapo_solgen_rlad/hf_iter100,OUT=$PWD/runs/eval/rlad_iter100,BENCHMARK=aime25 jobs/eval_rlad.sbatch
+#   rlad_inference_sbatch --export=ALL,ABSGEN_HF=$PWD/runs/sft_absgen_rft/hf,SOLGEN_HF=$PWD/runs/dapo_solgen_rlad/hf_iter100,OUT=$PWD/runs/eval/rlad_iter100,BENCHMARK=aime25 jobs/eval_rlad.sbatch
 # Submit (baseline w/abs):  SOLGEN_HF=$PWD/runs/dapo_baseline/hf_iter100, OUT=.../eval/dapo_baseline_wabs
 # Submit (base w/abs):      SOLGEN_HF=Qwen/Qwen3-1.7B, OUT=.../eval/base_wabs
 
@@ -50,17 +50,18 @@ export PYTHONUNBUFFERED=1
 mkdir -p "${OUT}" "${RLAD_LOGS}"
 
 cd "${CODE}/eval"
-NSHARDS=${NSHARDS:-8}; CHUNK=${CHUNK:-8}
+NSHARDS=${NSHARDS:-$(( ${SLURM_JOB_NUM_NODES:-1} * RLAD_GPUS_PER_NODE ))}; CHUNK=${CHUNK:-8}
 STAGE=solve; [[ "${MODE}" == "joint" ]] && STAGE=joint
 if [[ "${MODE}" != "joint" ]]; then
-  echo "=== gen-abs (pi_abs=${ABSGEN_HF}) ==="
-  CUDA_VISIBLE_DEVICES=0 python eval_rlad.py gen-abs --absgen-hf "${ABSGEN_HF}" \
-    --benchmark "${BENCHMARK}" --out "${OUT}" --k "${K}" \
-    --abs-max-tokens "${ABS_MAX_TOKENS}" --seed "${SEED}" --chunk "${CHUNK}"
+  echo "=== gen-abs (pi_abs=${ABSGEN_HF}), ${NSHARDS}-way data parallel ==="
+  "${CODE}/jobs/run_gpu_shards.sh" \
+    "${NSHARDS}" "${RLAD_GPUS_PER_NODE}" --shard --num-shards \
+    "${RLAD_LOGS}" evalrlad_genabs_shard \
+    python eval_rlad.py gen-abs --absgen-hf "${ABSGEN_HF}" \
+      --benchmark "${BENCHMARK}" --out "${OUT}" --k "${K}" \
+      --abs-max-tokens "${ABS_MAX_TOKENS}" --seed "${SEED}" --chunk "${CHUNK}"
 fi
 echo "=== ${STAGE} (pi_sol=${SOLGEN_HF}), ${NSHARDS}-way data-parallel ==="
-# one process per GPU; per-shard files + skip-done => resumable across cancels/timeouts
-pids=()
 SOLVE_ARGS=(
   --solgen-hf "${SOLGEN_HF}"
   --benchmark "${BENCHMARK}"
@@ -74,15 +75,10 @@ SOLVE_ARGS=(
   --chunk "${CHUNK}"
 )
 [[ "${SKIP_WOABS}" == 0 ]] || SOLVE_ARGS+=(--skip-woabs)
-for s in $(seq 0 $((NSHARDS-1))); do
-  CUDA_VISIBLE_DEVICES=$s python eval_rlad.py "${STAGE}" "${SOLVE_ARGS[@]}" \
-    --shard "$s" --num-shards "${NSHARDS}" \
-    > "${RLAD_LOGS}/evalrlad_${STAGE}_shard${s}_${SLURM_JOB_ID}.log" 2>&1 &
-  pids+=($!)
-done
-rc=0; for p in "${pids[@]}"; do wait "$p" || rc=1; done
-echo "${STAGE} shards done (rc=$rc)"
-(( rc == 0 )) || exit "${rc}"
+"${CODE}/jobs/run_gpu_shards.sh" \
+  "${NSHARDS}" "${RLAD_GPUS_PER_NODE}" --shard --num-shards \
+  "${RLAD_LOGS}" "evalrlad_${STAGE}_shard" \
+  python eval_rlad.py "${STAGE}" "${SOLVE_ARGS[@]}"
 echo "=== summarize ==="
 SUMMARY_ARGS=(--benchmark "${BENCHMARK}" --out "${OUT}" --mode "${MODE}" --n "${N}" --k "${K}")
 [[ "${SKIP_WOABS}" == 0 ]] || SUMMARY_ARGS+=(--skip-woabs)

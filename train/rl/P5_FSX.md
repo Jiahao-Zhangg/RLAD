@@ -2,8 +2,9 @@
 
 This runbook prepares the original RLAD abstraction generator: warm-start SFT, offline RFT,
 Hugging Face publication, and the final DeepScaleR-hard comparison. It assumes the repository is
-cloned at `/fsx/gstevenw/testing_alignment_algos/RLAD`, Slurm exposes eight GPUs with
-`--gpus-per-node=8`, and Pyxis/enroot accepts `--container-image`.
+cloned at `/fsx/gstevenw/testing_alignment_algos/RLAD`, each P5 node exposes eight GPUs, and
+Pyxis/enroot accepts `--container-image`. GPU data generation and evaluation reserve
+`ip-10-1-81-8` and `ip-10-1-38-11` together; training and conversion remain single-node.
 
 ## Automated controller
 
@@ -29,6 +30,13 @@ settings, `./RFT_pipeline.sh archive-rft` moves RFT data, checkpoints, and local
 aside instead of deleting them, and refuses to run while a related Slurm job is active. It does
 not delete already-published HF repositories or W&B runs. To change pipeline parameters or
 the repository commit, move both `train/rl/data` and `train/rl/runs` aside and start a fresh run.
+
+The checked-in profile sets `RLAD_INFERENCE_NODES=2`, the two-node nodelist above,
+`RLAD_GPUS_PER_NODE=8`, and therefore `NSHARDS=16`. The controller passes these settings only to
+base scoring, warm-start generation, RFT generation/scoring, and final evaluation. Each allocation
+starts one launcher task per node and one vLLM process per local GPU, producing disjoint global
+shards `0` through `15`. A barrier completes before merge, validation, or summarization. Do not
+change only `--nodes`: the launcher and global shard count must remain consistent.
 
 After training, the same `run` command publishes four private repositories under the username
 returned by the existing HF login:
@@ -80,9 +88,10 @@ compatible `miles.sqsh`, then verify `test -f "$RLAD_CONTAINER"`. All container-
 under `/fsx`, which is mounted as `/fsx:/fsx`; home mounting remains disabled. Run the HF check
 after sourcing the profile because cached HF credentials live under its configured `HF_HOME`.
 
-Always source `.env.cluster` in a new login shell. Submit direct jobs through `jobs/sbatch.sh` so
-the P5 partition, 32 CPUs, 400 GiB RAM, job working directory, and optional account are applied
-before Slurm parses the request.
+Always source `.env.cluster` in a new login shell. Submit single-node jobs through
+`jobs/sbatch.sh` and sharded GPU generation/evaluation through `rlad_inference_sbatch`; both apply
+the P5 partition, 32 CPUs per task, 400 GiB RAM per node, job working directory, and optional
+account before Slurm parses the request.
 
 ## 1. Curriculum and SFT corpus
 
@@ -93,7 +102,7 @@ rlad_activate_conda
 export PYTHONPATH=$PWD
 
 python -m rlad_plugin.data_prep build-pool --n-pool 6000
-jobs/sbatch.sh --export=ALL,MODEL_PATH=Qwen/Qwen3-1.7B,BENCHMARKS=dsr_pool,N_SAMPLES=8,MAX_TOKENS=8192,OUT_DIR=$RLAD_RUNS/eval/dsr_pool_score jobs/eval.sbatch
+rlad_inference_sbatch --export=ALL,MODEL_PATH=Qwen/Qwen3-1.7B,BENCHMARKS=dsr_pool,N_SAMPLES=8,MAX_TOKENS=8192,OUT_DIR=$RLAD_RUNS/eval/dsr_pool_score jobs/eval.sbatch
 ```
 
 The base evaluation is resumable. Under a short wall-time, resubmit the same command until the
@@ -107,13 +116,13 @@ Only then build the curriculum and launch local-teacher distillation:
 
 ```bash
 python -m rlad_plugin.data_prep partition --hard-max 0.125 --easy-min 0.5
-jobs/sbatch.sh jobs/warmstart.sbatch
+rlad_inference_sbatch jobs/warmstart.sbatch
 ```
 
-The required output is `data/train_absgen_sft.jsonl`. `warmstart.sbatch` uses one GPU for the
-Qwen3-4B-Instruct teacher even though the full P5 node is allocated. This generation is not
-incrementally resumable; increase `WARMSTART_TIME` if it cannot finish within the default
-`03:55:00`, then inspect the failed log before explicitly retrying.
+The required output is `data/train_absgen_sft.jsonl`. `warmstart.sbatch` distributes curriculum
+problems over all 16 GPUs, writes one atomic file per shard, then merges them in original curriculum
+order. Increase `WARMSTART_TIME` if a shard cannot finish within the default `03:55:00`, then
+inspect the failed log before explicitly retrying.
 
 ## 2. Base checkpoint and SFT
 
@@ -148,7 +157,7 @@ reference four-hour limit:
 ```bash
 SFT_HF=$RLAD_RUNS/sft_absgen/hf/iter_${SFT_ITER}
 for _ in $(seq 6); do
-  jobs/sbatch.sh --job-name=rlad-rft-data --dependency=singleton \
+  rlad_inference_sbatch --job-name=rlad-rft-data --dependency=singleton \
     --export=ALL,ABSGEN_HF=${SFT_HF} jobs/rft_data.sbatch
 done
 ```

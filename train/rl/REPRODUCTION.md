@@ -65,12 +65,13 @@ export RLAD_CONTAINER=/path/to/miles.sqsh
 export RLAD_CONTAINER_MOUNTS=/shared:/shared   # e.g. /fsx:/fsx
 ```
 
-`#SBATCH` directives do not expand shell variables. Direct jobs therefore use `jobs/sbatch.sh`,
-which applies the site options before allocation; `jobs/chain.sh` uses the same wrapper internally.
-The reference setup is a single node of 8×H100 with Slurm + pyxis/enroot; the training scripts use
-TP=2, CP=2 and chain `≤4h` segments as a resumable singleton chain (see §5). Submit all jobs from
-`train/rl/`; the wrapper creates `logs/`, routes output there, and sets `RLAD_HOME` as the job
-working directory.
+`#SBATCH` directives do not expand shell variables. Single-node jobs therefore use
+`jobs/sbatch.sh`; sharded host-side GPU jobs use `rlad_inference_sbatch`, which adds the configured
+node count, nodelist, and GPUs per node. Both apply site options before allocation, while
+`jobs/chain.sh` uses the single-node wrapper internally. Training uses one 8×H100 node with TP=2,
+CP=2 and chains `≤4h` segments as a resumable singleton chain (see §5). Host-side generation and
+evaluation use one process per allocated GPU. Submit all jobs from `train/rl/`; the wrappers create
+`logs/`, route output there, and set `RLAD_HOME` as the job working directory.
 See [`P5_FSX.md`](P5_FSX.md) for the concrete FSx/P5 profile.
 
 ---
@@ -88,7 +89,7 @@ export PYTHONPATH=$PWD
 python -m rlad_plugin.data_prep build-pool --n-pool 6000        # -> data/benchmarks/dsr_pool.jsonl
 
 # (2) score the base model on the pool (per-problem success rate drives the curriculum)
-jobs/sbatch.sh --export=ALL,MODEL_PATH=Qwen/Qwen3-1.7B,BENCHMARKS=dsr_pool,N_SAMPLES=8,MAX_TOKENS=8192,OUT_DIR=$RLAD_RUNS/eval/dsr_pool_score jobs/eval.sbatch
+rlad_inference_sbatch --export=ALL,MODEL_PATH=Qwen/Qwen3-1.7B,BENCHMARKS=dsr_pool,N_SAMPLES=8,MAX_TOKENS=8192,OUT_DIR=$RLAD_RUNS/eval/dsr_pool_score jobs/eval.sbatch
 
 # (3) partition into easy / medium (+ held-out hard); rows carry the raw problem in metadata
 python -m rlad_plugin.data_prep partition --hard-max 0.125 --easy-min 0.5
@@ -103,7 +104,7 @@ non-leaking cheatsheet from each gold solution with a stronger instruct model (d
 `Qwen3-4B-Instruct-2507`; configure your own via the script's flags) and applies a leakage filter:
 
 ```bash
-jobs/sbatch.sh jobs/warmstart.sbatch        # -> data/train_absgen_sft.jsonl  (chat "messages" format)
+rlad_inference_sbatch jobs/warmstart.sbatch # -> data/train_absgen_sft.jsonl  (chat "messages" format)
 ```
 
 **Online-variant data.** RLAD-Hierarchical trains directly on `train_curriculum.jsonl` (bare
@@ -169,7 +170,7 @@ LAUNCHER=$PWD/jobs/sft_launch.sh jobs/chain.sh rlad_plugin/configs/sft_absgen.sh
 #   convert the final SFT checkpoint to HF (see §6) -> runs/sft_absgen/hf/iter_<N>
 
 # (2) offline RFT pi_abs: score sampled abstractions by downstream solver success, keep the best
-jobs/sbatch.sh --export=ALL,ABSGEN_HF=$RLAD_RUNS/sft_absgen/hf/iter_<N> jobs/rft_data.sbatch   # -> data/train_absgen_rft.jsonl
+rlad_inference_sbatch --export=ALL,ABSGEN_HF=$RLAD_RUNS/sft_absgen/hf/iter_<N> jobs/rft_data.sbatch   # -> data/train_absgen_rft.jsonl
 LAUNCHER=$PWD/jobs/sft_launch.sh jobs/chain.sh rlad_plugin/configs/rft_absgen.sh 1 rlad-rft-absgen
 #   convert -> runs/sft_absgen_rft/hf/iter_<N>   (this is the shared pi_abs used at eval)
 
@@ -224,17 +225,17 @@ as HuggingFace checkpoint dirs (from §6):
 
 ```bash
 # original RLAD / +DAPO / base: pi_abs = the RFT'd generator, pi_sol = the arm's solver checkpoint
-jobs/sbatch.sh --export=ALL,ABSGEN_HF=$RLAD_RUNS/sft_absgen_rft/hf/iter_<N>,SOLGEN_HF=$RLAD_RUNS/<ARM>/hf_iter<N>,OUT=$RLAD_RUNS/eval/<ARM>,BENCHMARK=aime25 jobs/eval_rlad.sbatch
+rlad_inference_sbatch --export=ALL,ABSGEN_HF=$RLAD_RUNS/sft_absgen_rft/hf/iter_<N>,SOLGEN_HF=$RLAD_RUNS/<ARM>/hf_iter<N>,OUT=$RLAD_RUNS/eval/<ARM>,BENCHMARK=aime25 jobs/eval_rlad.sbatch
 ```
 
 For the online variants the single model is both roles:
 
 ```bash
 # RLAD-Hierarchical (and RLAD-Joint) self-hint dual eval: point both roles at the variant checkpoint
-jobs/sbatch.sh --export=ALL,ABSGEN_HF=$RLAD_RUNS/rlad_hierarchical/hf_iter<N>,SOLGEN_HF=$RLAD_RUNS/rlad_hierarchical/hf_iter<N>,OUT=$RLAD_RUNS/eval/rlad_hierarchical,BENCHMARK=aime25 jobs/eval_rlad.sbatch
+rlad_inference_sbatch --export=ALL,ABSGEN_HF=$RLAD_RUNS/rlad_hierarchical/hf_iter<N>,SOLGEN_HF=$RLAD_RUNS/rlad_hierarchical/hf_iter<N>,OUT=$RLAD_RUNS/eval/rlad_hierarchical,BENCHMARK=aime25 jobs/eval_rlad.sbatch
 
 # RLAD-Joint native combined-prompt eval (its training distribution): MODE=joint (no separate pi_abs)
-jobs/sbatch.sh --export=ALL,MODE=joint,SOLGEN_HF=$RLAD_RUNS/rlad_joint/hf_iter<N>,OUT=$RLAD_RUNS/eval/rlad_joint_joint,BENCHMARK=aime25 jobs/eval_rlad.sbatch
+rlad_inference_sbatch --export=ALL,MODE=joint,SOLGEN_HF=$RLAD_RUNS/rlad_joint/hf_iter<N>,OUT=$RLAD_RUNS/eval/rlad_joint_joint,BENCHMARK=aime25 jobs/eval_rlad.sbatch
 ```
 
 Results are written to `<OUT>/summary.json` (`woabs_pass1`, `wabs_avg_pass1`, `wabs_best_pass1`,

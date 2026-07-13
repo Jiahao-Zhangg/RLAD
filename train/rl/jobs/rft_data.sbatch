@@ -10,10 +10,10 @@
 #SBATCH --error=logs/%x_%j.err
 #
 # rft_data.sbatch — build the offline RFT corpus for pi_abs (absgen_score.py, method_spec §4.2).
-# 8-way data-parallel over the node's GPUs, fully resumable (per-shard append + skip-completed),
+# Multi-node data-parallel, fully resumable (per-shard append + skip-completed),
 # so a 4h timeout just resumes. Score stage dominates (~118 GPU-h). Submit as a singleton chain:
-#   for i in $(seq 6); do jobs/sbatch.sh --job-name=rlad-rft-data --dependency=singleton jobs/rft_data.sbatch; done
-# Stages per segment: gen-abs (8-way, cheap) -> score (8-way, heavy, resumes) -> build-rft (when complete).
+#   for i in $(seq 6); do rlad_inference_sbatch --job-name=rlad-rft-data --dependency=singleton jobs/rft_data.sbatch; done
+# Stages per segment: gen-abs -> score (heavy, resumable) -> build-rft (when complete).
 # RFT_STAGE can pin one stage for the root RFT_pipeline.sh controller. Unlike the
 # legacy all-in-one mode, shard failures are propagated to Slurm.
 set -euo pipefail
@@ -23,7 +23,7 @@ DATA=${RLAD_DATA}
 # miles exports HF per-iteration under hf/iter_N; resolve the LATEST as the warm-started pi_abs
 ABSGEN_HF=${ABSGEN_HF:-$(ls -d ${RLAD_RUNS}/sft_absgen/hf/iter_* 2>/dev/null | sort -V | tail -1)}
 [[ -f "${ABSGEN_HF}/config.json" ]] || { echo "ERROR: no HF model_dir at ABSGEN_HF=${ABSGEN_HF}" >&2; exit 1; }
-NSHARDS=${NSHARDS:-8}
+NSHARDS=${NSHARDS:-$(( ${SLURM_JOB_NUM_NODES:-1} * RLAD_GPUS_PER_NODE ))}
 NPROB=${NPROB:-1500}; K=${K:-4}; M=${M:-8}; MAXTOK=${MAXTOK:-16384}; MARGIN=${MARGIN:-0.0}
 RFT_STAGE=${RFT_STAGE:-all}
 case "${RFT_STAGE}" in
@@ -38,18 +38,12 @@ export PYTHONUNBUFFERED=1 PYTHONPATH=${CODE}
 mkdir -p "${RLAD_LOGS}"
 cd "${CODE}"
 
-run_shards () {   # $1 = stage name, $2... = extra args; launches one process per GPU
+run_shards () {   # $1 = stage name, $2... = extra args
   local stage="$1"; shift
-  local pids=()
-  for s in $(seq 0 $((NSHARDS-1))); do
-    CUDA_VISIBLE_DEVICES=$s python -m rlad_plugin.absgen_score "$stage" \
-        --shard "$s" --num-shards "$NSHARDS" "$@" \
-        > "${RLAD_LOGS}/rftdata_${stage}_shard${s}_${SLURM_JOB_ID}.log" 2>&1 &
-    pids+=($!)
-  done
-  local rc=0
-  for p in "${pids[@]}"; do wait "$p" || rc=1; done
-  return $rc
+  "${CODE}/jobs/run_gpu_shards.sh" \
+      "${NSHARDS}" "${RLAD_GPUS_PER_NODE}" --shard --num-shards \
+      "${RLAD_LOGS}" "rftdata_${stage}_shard" \
+      python -m rlad_plugin.absgen_score "${stage}" "$@"
 }
 
 if [[ "${RFT_STAGE}" == all || "${RFT_STAGE}" == gen-abs ]]; then

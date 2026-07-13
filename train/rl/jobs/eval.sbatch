@@ -13,7 +13,7 @@
 # benchmarks. Runs in the HOST conda env (vLLM); no container.
 #
 # Submit (G1 base harness gate, AIME2025, n=32, 32K budget):
-#   jobs/sbatch.sh --export=ALL,MODEL_PATH=Qwen/Qwen3-1.7B,BENCHMARKS=aime25,N_SAMPLES=32,MAX_TOKENS=32768,OUT_DIR=$PWD/runs/eval/base_qwen3_1p7b jobs/eval.sbatch
+#   rlad_inference_sbatch --export=ALL,MODEL_PATH=Qwen/Qwen3-1.7B,BENCHMARKS=aime25,N_SAMPLES=32,MAX_TOKENS=32768,OUT_DIR=$PWD/runs/eval/base_qwen3_1p7b jobs/eval.sbatch
 # Probe:  add N_SAMPLES=4
 # For RLAD w/-abstraction eval use eval_rlad.sbatch (separate; needs pi_abs).
 
@@ -28,7 +28,7 @@ BENCHMARKS=${BENCHMARKS:-"aime25"}
 BENCHMARKS="${BENCHMARKS//[: ]/,}"   # Slurm --export splits on commas; accept :/space too
 N_SAMPLES=${N_SAMPLES:-32}
 MAX_TOKENS=${MAX_TOKENS:-32768}      # paper Table-2 eval budget (max extrapolation len)
-NUM_SHARDS=${NUM_SHARDS:-8}
+NUM_SHARDS=${NUM_SHARDS:-$(( ${SLURM_JOB_NUM_NODES:-1} * RLAD_GPUS_PER_NODE ))}
 OUT_DIR=${OUT_DIR:-${RUNS}/eval/$(basename "${MODEL_PATH}")}
 
 rlad_activate_conda
@@ -51,25 +51,19 @@ if [[ -d "${MODEL_PATH}" ]]; then
     python "${CODE}/eval/trim_vocab_padding.py" "${MODEL_PATH}"
 fi
 
-PIDS=()
-for SHARD in $(seq 0 $((NUM_SHARDS - 1))); do
-    CUDA_VISIBLE_DEVICES=${SHARD} python "${CODE}/eval/vllm_eval.py" \
+if ! "${CODE}/jobs/run_gpu_shards.sh" \
+    "${NUM_SHARDS}" "${RLAD_GPUS_PER_NODE}" --shard-id --num-shards \
+    "${OUT_DIR}" shard \
+    python "${CODE}/eval/vllm_eval.py" \
         --model-path "${MODEL_PATH}" \
         --benchmarks-dir "${RLAD_DATA}/benchmarks" \
         --output-dir "${OUT_DIR}" \
         --benchmarks "${BENCHMARKS}" \
         --n-samples "${N_SAMPLES}" \
-        --max-tokens "${MAX_TOKENS}" \
-        --num-shards "${NUM_SHARDS}" --shard-id "${SHARD}" \
-        > "${OUT_DIR}/shard${SHARD}.log" 2>&1 &
-    PIDS+=($!)
-done
-
-FAIL=0
-for pid in "${PIDS[@]}"; do
-    wait "${pid}" || FAIL=1
-done
-[[ ${FAIL} -ne 0 ]] && echo "WARNING: a shard failed — job is resumable, resubmit to continue" >&2
+        --max-tokens "${MAX_TOKENS}"; then
+    echo "WARNING: one or more GPU shards failed; resubmit to resume" >&2
+    exit 1
+fi
 
 python "${CODE}/eval/vllm_eval.py" \
     --model-path "${MODEL_PATH}" \
@@ -80,5 +74,4 @@ python "${CODE}/eval/vllm_eval.py" \
     --max-tokens "${MAX_TOKENS}" \
     --summarize-only
 
-[[ ${FAIL} -eq 0 ]] || exit 1
 echo "Eval job ${SLURM_JOB_ID} finished. Results in ${OUT_DIR}"
