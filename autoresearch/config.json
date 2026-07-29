@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "name": "parallel-10-hint-book-p5-pilot",
+  "dataset": {
+    "repo_id": "zjhhhh/DeepScaleR-Qwen3-1.7B-2k-strategy-error-200",
+    "revision": "1764f5c2ed03ddd7a9b7b9d9252e62f1e8fab3a6",
+    "fingerprint": "ff45e4dc2b5c512a",
+    "parquet_sha256": "a322a82aa1c8e6cb81dbcee11be982ad8d1a9f35e5c3d050b3de8fda3b146271",
+    "row_count": 200,
+    "train_positions": [
+      163,
+      28,
+      6,
+      189,
+      70,
+      62,
+      57,
+      35,
+      188,
+      26
+    ],
+    "heldout_positions": [
+      173,
+      139,
+      22,
+      151,
+      108,
+      8,
+      7,
+      23,
+      55,
+      59
+    ]
+  },
+  "student": {
+    "repo_id": "Qwen/Qwen3-1.7B",
+    "revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+    "max_model_len": 40960,
+    "gpu_memory_utilization": 0.9
+  },
+  "grader": {
+    "repo": "https://github.com/radixark/miles.git",
+    "revision": "9437366e0aa3a25294720f70d18b081067595f85",
+    "deepscaler_sha256": "7be863a12650d5054f5245bee0a9f01e1efe4b314db2e272c9d4261e18feb0a0",
+    "math_utils_sha256": "db83eabd2941fb21253c9f733752d775d80488797582e093f2b94bb29d3d39cc"
+  },
+  "runtime": {
+    "python_min": "3.10",
+    "python_max_exclusive": "3.13",
+    "torch": "2.6.0",
+    "transformers": "4.51.3",
+    "datasets": "3.6.0",
+    "huggingface_hub": "0.36.2",
+    "vllm": "0.8.5.post1",
+    "math_verify": "0.6.0",
+    "pylatexenc": "2.10",
+    "sympy": "1.13.1",
+    "packaging": "25.0"
+  },
+  "sampling": {
+    "rollouts": 8,
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": -1,
+    "min_p": 0.0,
+    "presence_penalty": 0.0,
+    "frequency_penalty": 0.0,
+    "repetition_penalty": 1.0,
+    "ignore_eos": false,
+    "seed": 1234,
+    "tensor_parallel_size": 1,
+    "max_tokens": null,
+    "thinking_enabled": true
+  },
+  "objective": {
+    "lambda": 1,
+    "train_denominator": 8,
+    "heldout_questions": 10,
+    "heldout_denominator": 80,
+    "comparison": [
+      "higher_J",
+      "higher_heldout",
+      "shorter_hint"
+    ]
+  },
+  "hint_limits": {
+    "hints": 10,
+    "hard_tokens_per_hint": 256,
+    "worker_tokens_per_hint": 200,
+    "hard_total_tokens": 2048
+  },
+  "budget": {
+    "max_rounds": 6,
+    "stop_after_consecutive_zero_keep_rounds": 3
+  },
+  "slurm": {
+    "partition": "ml.p5.48xlarge",
+    "nodes": [
+      "ip-10-1-38-11",
+      "ip-10-1-81-8"
+    ],
+    "exclusive": true,
+    "gpus_per_node": 8,
+    "pool_slots": 16,
+    "gpus_per_task": 1,
+    "gpu_binding": "slurm_gpus_per_task_1_gpu_bind_single_1",
+    "cpus_per_step": 12,
+    "memory": "0",
+    "time": "1-00:00:00"
+  },
+  "publication": {
+    "remote": "origin",
+    "commit_prefix": "autoresearch: hinter round"
+  }
+}
