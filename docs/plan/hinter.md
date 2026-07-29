@@ -50,7 +50,9 @@ Hints should describe reusable strategies, not answers or full problem-specific 
 
 ## Student sampling implementation
 
-For sampling **without a hint**, reuse the existing response-sampling code in this repository. Keep **thinking mode enabled** and impose **no output-length limit**.
+For sampling **without a hint**, reuse the existing response-sampling code in
+this repository. Keep **thinking mode enabled** and use the repository
+evaluator's default `max_tokens = 16384`.
 
 For sampling **with a hint**, use the same sampling code and identical settings; only add the hint to the student prompt. Do not create a separate inference implementation or change decoding settings between no-hint and hint-assisted sampling.
 

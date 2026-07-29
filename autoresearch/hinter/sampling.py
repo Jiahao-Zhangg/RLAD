@@ -57,7 +57,7 @@ def sampling_kwargs(config: dict[str, Any]) -> dict[str, Any]:
         "frequency_penalty": float(sampling["frequency_penalty"]),
         "repetition_penalty": float(sampling["repetition_penalty"]),
         "ignore_eos": bool(sampling["ignore_eos"]),
-        "max_tokens": None,
+        "max_tokens": int(sampling["max_tokens"]),
         "seed": int(sampling["seed"]),
     }
 

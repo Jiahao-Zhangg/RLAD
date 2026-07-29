@@ -25,7 +25,7 @@ Audit all of the following:
 
 1. Fixed dataset revision/fingerprint/hash and fixed train/held-out indices.
 2. Qwen3-1.7B model revision, thinking-on prompt rendering, `n=8` decoder, and
-   no application output cap.
+   the repository-default `max_tokens=16384`.
 3. Both prompt conditions call the repository’s shared sampling primitive and
    differ only by inserting the hint.
 4. Exact clean `radixark/miles` commit and DeepScaleR source hashes.

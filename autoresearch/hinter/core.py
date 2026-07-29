@@ -392,7 +392,7 @@ def _validate_config(config: dict[str, Any]) -> None:
         "ignore_eos": False,
         "seed": 1234,
         "tensor_parallel_size": 1,
-        "max_tokens": None,
+        "max_tokens": 16384,
         "thinking_enabled": True,
     }:
         raise RuntimeError("student sampling invariants changed")

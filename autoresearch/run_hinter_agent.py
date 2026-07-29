@@ -82,8 +82,9 @@ workspace `work_zsw/`. Never read or modify the older `work/` experiment.
 - Hints must be reusable strategy, not answers or full solutions. Each worker
   proposal must differ from its incumbent and remain <=200 Qwen tokens so any
   independently assembled book remains <=2048.
-- Keep the pinned model, dataset/split, exact miles grader, n=8 decoder, prompt
-  renderer, objective, and tie-break frozen. Do not run any separate eval.
+- Keep the pinned model, dataset/split, exact miles grader, n=8 decoder,
+  `max_tokens=16384`, prompt renderer, objective, and tie-break frozen. Do not
+  run any separate eval.
 
 ## Preflight and one-time setup
 

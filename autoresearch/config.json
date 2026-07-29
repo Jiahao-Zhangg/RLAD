@@ -69,7 +69,7 @@
     "ignore_eos": false,
     "seed": 1234,
     "tensor_parallel_size": 1,
-    "max_tokens": null,
+    "max_tokens": 16384,
     "thinking_enabled": true
   },
   "objective": {

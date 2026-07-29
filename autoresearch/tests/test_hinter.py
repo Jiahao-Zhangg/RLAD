@@ -34,7 +34,7 @@ def test_config_matches_contract(config: dict) -> None:
     )
     assert config["slurm"]["pool_slots"] == 16
     assert config["sampling"]["rollouts"] == 8
-    assert config["sampling"]["max_tokens"] is None
+    assert config["sampling"]["max_tokens"] == 16384
 
 
 def test_agent_sbatch_does_not_consume_h100_pool() -> None:
