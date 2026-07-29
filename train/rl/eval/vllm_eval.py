@@ -47,6 +47,91 @@ DEFAULT_BENCHMARKS = "aime24,aime25,amc23,minerva,math500"
 
 
 # ----------------------------------------------------------------------------
+# Shared response sampling
+# ----------------------------------------------------------------------------
+
+def resolve_sampling_kwargs(
+    sampling_kwargs: dict,
+    *,
+    prompt_tokens: int,
+    max_model_len: int | None,
+) -> dict:
+    """Resolve an optional no-cap request against the model context.
+
+    The ordinary evaluator passes an integer ``max_tokens`` and therefore
+    retains its historical behavior exactly.  Callers that explicitly request
+    ``max_tokens=None`` get the full remaining context for each prompt.  The
+    latter is computed here because vLLM 0.8.5's offline ``n>1`` path can
+    forward ``None`` to an internal assertion before expanding it.
+    """
+    resolved = dict(sampling_kwargs)
+    if resolved.get("max_tokens") is not None:
+        return resolved
+    if max_model_len is None:
+        raise ValueError("max_model_len is required when max_tokens is None")
+    remaining = int(max_model_len) - int(prompt_tokens)
+    if remaining < 1:
+        raise ValueError(
+            f"prompt has {prompt_tokens} tokens and leaves no generation context"
+        )
+    resolved["max_tokens"] = remaining
+    return resolved
+
+
+def sample_rendered_prompts(
+    *,
+    llm,
+    tokenizer,
+    sampling_params_cls,
+    rendered_prompts: list[str],
+    sampling_kwargs: dict,
+    max_model_len: int | None = None,
+):
+    """Sample already-rendered response prompts through the repository path.
+
+    Prompts are encoded to token IDs with ``add_special_tokens=False`` so a
+    chat-template BOS is not duplicated.  A fixed integer output limit uses
+    one shared ``SamplingParams`` object, matching the original evaluator.
+    A deliberate no-cap request uses one parameter object per prompt because
+    each prompt has a different amount of model context remaining.
+    """
+    if not rendered_prompts:
+        return []
+    prompt_ids = [
+        tokenizer.encode(prompt, add_special_tokens=False)
+        for prompt in rendered_prompts
+    ]
+    prompts = [{"prompt_token_ids": value} for value in prompt_ids]
+    if sampling_kwargs.get("max_tokens") is None:
+        parameters = [
+            sampling_params_cls(
+                **resolve_sampling_kwargs(
+                    sampling_kwargs,
+                    prompt_tokens=len(value),
+                    max_model_len=max_model_len,
+                )
+            )
+            for value in prompt_ids
+        ]
+    else:
+        parameters = sampling_params_cls(**sampling_kwargs)
+    outputs = llm.generate(prompts, parameters)
+    if len(outputs) != len(rendered_prompts):
+        raise RuntimeError(
+            f"vLLM returned {len(outputs)} prompt outputs; expected "
+            f"{len(rendered_prompts)}"
+        )
+    expected = int(sampling_kwargs["n"])
+    for index, output in enumerate(outputs):
+        if len(output.outputs) != expected:
+            raise RuntimeError(
+                f"vLLM returned {len(output.outputs)} rollouts for prompt "
+                f"{index}; expected {expected}"
+            )
+    return outputs
+
+
+# ----------------------------------------------------------------------------
 # Grading (A15) — mirrors the training reward in rlad_plugin/reward_math.py /
 # miles' deepscaler grader: split on the LAST </think>, no tag => 0.
 # ----------------------------------------------------------------------------
@@ -315,25 +400,22 @@ def run_benchmark(bench: str, args, tokenizer, get_llm, sampling_params_cls) -> 
 
     new_rows: list[dict] = []
     if todo:
-        # Rendered prompts contain the literal BOS from the chat template; pass
-        # token ids (add_special_tokens=False) so vLLM doesn't prepend a second
-        # BOS (same convention as prefix_gen.py and miles' rollout encoding).
-        prompts = [
-            {
-                "prompt_token_ids": tokenizer.encode(
-                    render_prompt(tokenizer, p["problem"]), add_special_tokens=False
-                )
-            }
-            for p in todo
-        ]
-        sampling = sampling_params_cls(
-            n=args.n_samples,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            max_tokens=args.max_tokens,
-            seed=args.seed,
+        outputs = sample_rendered_prompts(
+            llm=get_llm(),
+            tokenizer=tokenizer,
+            sampling_params_cls=sampling_params_cls,
+            rendered_prompts=[
+                render_prompt(tokenizer, p["problem"])
+                for p in todo
+            ],
+            sampling_kwargs={
+                "n": args.n_samples,
+                "temperature": args.temperature,
+                "top_p": args.top_p,
+                "max_tokens": args.max_tokens,
+                "seed": args.seed,
+            },
         )
-        outputs = get_llm().generate(prompts, sampling)
         for problem, output in tqdm(
             zip(todo, outputs), total=len(todo), desc=f"grade {bench}"
         ):

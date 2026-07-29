@@ -48,9 +48,17 @@ Limits:
 
 Hints should describe reusable strategies, not answers or full problem-specific solutions.
 
+## Student sampling implementation
+
+For sampling **without a hint**, reuse the existing response-sampling code in this repository. Keep **thinking mode enabled** and impose **no output-length limit**.
+
+For sampling **with a hint**, use the same sampling code and identical settings; only add the hint to the student prompt. Do not create a separate inference implementation or change decoding settings between no-hint and hint-assisted sampling.
+
+All such sampling must follow the one-GPU Slurm rule below.
+
 ## Student and grader
 
-Use the project Qwen3-1.7B checkpoint, or `Qwen/Qwen3-1.7B` if none is configured. Freeze all inference settings before research. Generate 8 rollouts for every evaluated `(question, hint)` pair. For sampling without hint, reuse the code in this repo about sampling responses (but with thinking mode on and no output len limit). For sampling hint, just add the hint in the prompt.
+Use the project Qwen3-1.7B checkpoint, or `Qwen/Qwen3-1.7B` if none is configured. Freeze all inference settings before research. Generate 8 rollouts for every evaluated `(question, hint)` pair. Hint-assisted sampling must differ from the repository's no-hint sampling only by inserting the hint into the prompt.
 
 Use the exact grader from `radixark/miles` commit `9437366e0`:
 
@@ -98,6 +106,24 @@ This is the `lambda = 1` objective for that hint.
 
 The main process and all subagents may inspect the assigned training question, answer, rollouts, and grader results. They must not inspect held-out question text, answers, rollouts, or per-question results. The private evaluator reveals only `heldout_i` and `J_i` for each hint.
 
+## Slurm GPU rule
+
+Every subagent must obtain student samples through **Slurm**. Never run student inference directly on a login node.
+
+For each round, subagent `i` must:
+
+1. submit a Slurm job for its assigned training question and current hint;
+2. request exactly **1 GPU**;
+3. generate the 8 student rollouts inside that job;
+4. monitor the job until completion and inspect its saved training artifacts;
+5. use those training rollouts and grader results to propose one revision of `hint_i`.
+
+Launch the 10 one-GPU jobs independently so they may run in parallel. Reuse the repository's existing `sbatch` template or Slurm script rather than inventing cluster-specific directives. Record the Slurm job ID, output path, exit status, and runtime.
+
+If a job is pending, wait for it rather than replacing it with local inference. If it crashes, inspect the Slurm logs, fix only implementation issues, and resubmit the same experiment. A subagent's Slurm job may access only its assigned training question; it must never load held-out data.
+
+All later student sampling used to score proposed hints must also run through Slurm with exactly one GPU per job. Held-out scoring remains inside the private evaluator and exposes only aggregate `heldout_i` and `J_i`.
+
 ## Parallel autoresearch round
 
 In every round, launch **10 subagents in parallel**, one per hint.
@@ -106,9 +132,10 @@ Subagent `i` receives:
 
 - its assigned training question and answer;
 - the current `hint_i`;
-- its training rollouts and grader results;
-- its previous `train_i`, `heldout_i`, and `J_i`;
+- its previous `train_i`, aggregate `heldout_i`, and `J_i`;
 - the global hint token limits.
+
+It must obtain fresh training rollouts and grader results by submitting its own one-GPU Slurm job as described above.
 
 Each subagent proposes exactly one revised version of its own hint. It must not edit any other hint, and it must not access any held-out question or hidden held-out evaluation detail while forming the proposal.
 
@@ -201,6 +228,8 @@ Columns:
 round
 hint_id
 train_qid
+sampling_slurm_job_id
+proposal_eval_slurm_job_id
 incumbent_hash
 proposal_hash
 final_hash
