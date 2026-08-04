@@ -39,7 +39,7 @@ from .sampling import StudentSampler
 def _inside_work(path: Path) -> Path:
     resolved = path.resolve()
     if not resolved.is_relative_to(WORK_ROOT):
-        raise ValueError(f"task path escapes work_zsw: {resolved}")
+        raise ValueError(f"task path escapes autoresearch workspace: {resolved}")
     return resolved
 
 
@@ -63,7 +63,7 @@ def validate_train_packet(
     if (
         isinstance(round_number, bool)
         or not isinstance(round_number, int)
-        or not 0 <= round_number <= 6
+        or not 0 <= round_number <= 20
     ):
         raise ValueError("training packet round is invalid")
 
@@ -209,7 +209,11 @@ def _run_private(
         "hint_id": hint_id,
         "hint_hash": request["hint_hash"],
         "config_hash": config_hash,
-        **exact_metrics(train_correct, heldout_correct),
+        **exact_metrics(
+            train_correct,
+            heldout_correct,
+            objective_lambda=int(config["objective"]["lambda"]),
+        ),
     }
     require_exact_keys(result, PRIVATE_RESULT_KEYS, "private result")
     atomic_write_json(output_path, result)
@@ -229,7 +233,9 @@ def _validate_task_input_identity(
             if value["round"] != 0 or task_id != "setup-smoke":
                 raise ValueError("smoke task/input identity mismatch")
         else:
-            if not 1 <= int(value["round"]) <= 6:
+            if not 1 <= int(value["round"]) <= int(
+                config["budget"]["max_rounds"]
+            ):
                 raise ValueError("training packet round is outside the budget")
             expected = (
                 f"r{int(value['round']):02d}-train-"

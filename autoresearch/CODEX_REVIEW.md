@@ -11,7 +11,7 @@ The reviewer may inspect:
 - `train/rl/eval/vllm_eval.py`;
 - `train/rl/rlad_plugin/templates.py`;
 - held-out-safe setup manifests, smoke aggregates, and one-GPU receipts under
-  `work_zsw/research/setup/`.
+  `$RLAD_AUTORESEARCH_WORK/research/setup/`.
 
 The reviewer must not inspect:
 
@@ -31,14 +31,16 @@ Audit all of the following:
 4. Exact clean `radixark/miles` commit and DeepScaleR source hashes.
 5. Every student call requires a numeric Slurm step and exactly one visible
    GPU.
-6. The parent allocation is exactly the two named exclusive 8×H100 nodes and
-   allows at most sixteen one-GPU steps.
-7. Training workers receive one public packet only. Private output is
+6. The parent allocation is exactly the two configured exclusive 8-GPU nodes
+   for this lambda variant and allows at most sixteen one-GPU steps.
+7. Training workers receive one current public packet plus only their own
+   accumulated same-question, held-out-safe history. Private output is
    aggregate-only and never contains held-out text, answers, rollouts, or
    per-question rewards.
 8. Hint assignment, token/leak gates, exact count-derived metrics, independent
-   keep/discard comparisons, and tie-break ordering.
-9. Three-zero-keep/six-round stopping behavior and immutable round artifacts.
+   lambda-weighted keep/discard comparisons, and tie-break ordering.
+9. Unconditional 20-round behavior (zero-keep streaks never stop the run) and
+   immutable round artifacts.
 10. Git publication's explicit allowlist, transaction-authorized staged-index
     recovery, exact GitHub host check, and ignored private/runtime paths.
 11. Crash recovery and duplicate-task/duplicate-push prevention.
@@ -51,7 +53,7 @@ uv run --project autoresearch \
 ```
 
 On a genuine PASS, produce
-`work_zsw/review/independent_review.json` with exactly these keys:
+`$RLAD_AUTORESEARCH_WORK/review/independent_review.json` with exactly these keys:
 
 ```text
 schema_version

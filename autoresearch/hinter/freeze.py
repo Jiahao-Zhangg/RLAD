@@ -40,22 +40,26 @@ REVIEW_KEYS = {
     "findings",
 }
 
-SETUP_FILES = (
-    "work_zsw/research/setup/data_manifest.json",
-    "work_zsw/research/setup/train_public.json",
-    "work_zsw/research/setup/runtime_manifest.json",
-    "work_zsw/research/setup/model_manifest.json",
-    "work_zsw/research/setup/grader_manifest.json",
-    "work_zsw/research/setup/smoke_input.json",
-    "work_zsw/research/setup/smoke_output.json",
-    "work_zsw/research/setup/smoke_receipt.json",
-    "work_zsw/research/setup/private_smoke_input.json",
-    "work_zsw/research/setup/private_smoke_output.json",
-    "work_zsw/research/setup/private_smoke_receipt.json",
+WORKSPACE_PREFIX = str(WORK_ROOT.relative_to(REPO_ROOT))
+SETUP_FILES = tuple(
+    f"{WORKSPACE_PREFIX}/research/setup/{name}"
+    for name in (
+        "data_manifest.json",
+        "train_public.json",
+        "runtime_manifest.json",
+        "model_manifest.json",
+        "grader_manifest.json",
+        "smoke_input.json",
+        "smoke_output.json",
+        "smoke_receipt.json",
+        "private_smoke_input.json",
+        "private_smoke_output.json",
+        "private_smoke_receipt.json",
+    )
 )
 
 
-def _validate_smoke(config_hash: str) -> None:
+def _validate_smoke(config: dict[str, Any], config_hash: str) -> None:
     setup = RESEARCH_ROOT / "setup"
     smoke_request = load_json(setup / "smoke_input.json")
     smoke_output = load_json(setup / "smoke_output.json")
@@ -117,7 +121,10 @@ def _validate_smoke(config_hash: str) -> None:
 
     private_output = load_json(setup / "private_smoke_output.json")
     require_exact_keys(private_output, PRIVATE_RESULT_KEYS, "private smoke output")
-    validate_private_metrics(private_output)
+    validate_private_metrics(
+        private_output,
+        objective_lambda=int(config["objective"]["lambda"]),
+    )
     private_request = load_json(setup / "private_smoke_input.json")
     if (
         private_output["hint_id"] != private_request["hint_id"]
@@ -143,7 +150,7 @@ def freeze() -> dict[str, Any]:
     for relative in SETUP_FILES:
         if not (REPO_ROOT / relative).is_file():
             raise RuntimeError(f"required setup artifact missing: {relative}")
-    _validate_smoke(config_hash)
+    _validate_smoke(config, config_hash)
 
     review_path = WORK_ROOT / "review" / "independent_review.json"
     review = load_json(review_path)

@@ -23,13 +23,44 @@ REPO_ROOT = AUTORESEARCH_ROOT.parent
 WORK_ROOT = Path(
     os.environ.get("RLAD_AUTORESEARCH_WORK", REPO_ROOT / "work_zsw")
 ).resolve()
-if not WORK_ROOT.is_relative_to(REPO_ROOT) or WORK_ROOT.name != "work_zsw":
+WORKSPACE_LAMBDAS = {
+    "work_zsw": 1,
+    "work_zsw_lambda2": 2,
+    "work_zsw_lambda5": 5,
+    "work_zsw_lambda10": 10,
+}
+if (
+    not WORK_ROOT.is_relative_to(REPO_ROOT)
+    or WORK_ROOT.parent != REPO_ROOT
+    or WORK_ROOT.name not in WORKSPACE_LAMBDAS
+):
     raise RuntimeError(
-        "RLAD_AUTORESEARCH_WORK must resolve to this repository's work_zsw"
+        "RLAD_AUTORESEARCH_WORK must be one of this repository's isolated "
+        f"workspaces: {sorted(WORKSPACE_LAMBDAS)}"
     )
 RESEARCH_ROOT = WORK_ROOT / "research"
 CONFIG_PATH = AUTORESEARCH_ROOT / "config.json"
 LOCK_PATH = WORK_ROOT / "experiment.lock.json"
+
+ROUND_ID_PATTERN = r"(?:0[1-9]|1[0-9]|20)"
+ALLOWED_ALLOCATIONS = {
+    1: (
+        "ml.p5.48xlarge",
+        ("ip-10-1-38-11", "ip-10-1-81-8"),
+    ),
+    2: (
+        "ml.p4d.24xlarge",
+        ("ip-10-1-173-179", "ip-10-1-184-205"),
+    ),
+    5: (
+        "ml.p4d.24xlarge",
+        ("ip-10-1-196-96", "ip-10-1-226-48"),
+    ),
+    10: (
+        "ml.p5.48xlarge",
+        ("ip-10-1-38-11", "ip-10-1-81-8"),
+    ),
+}
 
 TRAIN_POSITIONS = (163, 28, 6, 189, 70, 62, 57, 35, 188, 26)
 HELDOUT_POSITIONS = (173, 139, 22, 151, 108, 8, 7, 23, 55, 59)
@@ -239,9 +270,9 @@ def validate_task_identity(task_id: str, mode: str) -> None:
     patterns = {
         "smoke": r"setup-smoke",
         "private-smoke": r"setup-private-smoke",
-        "train": r"r0[1-6]-train-h(?:0[1-9]|10)",
+        "train": rf"r{ROUND_ID_PATTERN}-train-h(?:0[1-9]|10)",
         "private": (
-            r"(?:baseline|r0[1-6]-private)-h(?:0[1-9]|10)"
+            rf"(?:baseline|r{ROUND_ID_PATTERN}-private)-h(?:0[1-9]|10)"
         ),
     }
     pattern = patterns.get(mode)
@@ -257,6 +288,7 @@ def source_hash_manifest() -> dict[str, str]:
         ".md",
         ".py",
         ".sbatch",
+        ".sh",
         ".toml",
     }
     paths = []
@@ -296,6 +328,34 @@ def source_bundle_hash(paths: tuple[str, ...] | None = None) -> str:
     return sha256_bytes(canonical_json_bytes(manifest))
 
 
+def _apply_environment_overrides(config: dict[str, Any]) -> dict[str, Any]:
+    """Return the workspace-specific config selected by a launch wrapper."""
+    effective = json.loads(json.dumps(config))
+    raw_lambda = os.environ.get("RLAD_AUTORESEARCH_LAMBDA")
+    raw_partition = os.environ.get("RLAD_AUTORESEARCH_PARTITION")
+    raw_nodes = os.environ.get("RLAD_AUTORESEARCH_NODES")
+    if raw_lambda is not None:
+        try:
+            objective_lambda = int(raw_lambda)
+        except ValueError as error:
+            raise RuntimeError(
+                "RLAD_AUTORESEARCH_LAMBDA must be an integer"
+            ) from error
+        effective["objective"]["lambda"] = objective_lambda
+    if raw_partition is not None:
+        effective["slurm"]["partition"] = raw_partition
+    if raw_nodes is not None:
+        nodes = [node.strip() for node in raw_nodes.split(",")]
+        if any(not node for node in nodes):
+            raise RuntimeError("RLAD_AUTORESEARCH_NODES contains an empty node")
+        effective["slurm"]["nodes"] = nodes
+    objective_lambda = effective["objective"]["lambda"]
+    effective["publication"]["commit_prefix"] = (
+        f"autoresearch: hinter lambda-{objective_lambda} round"
+    )
+    return effective
+
+
 def _validate_config(config: dict[str, Any]) -> None:
     require_exact_keys(
         config,
@@ -317,7 +377,7 @@ def _validate_config(config: dict[str, Any]) -> None:
     )
     if (
         config["schema_version"] != 1
-        or config["name"] != "parallel-10-hint-book-p5-pilot"
+        or config["name"] != "parallel-10-hint-book-autoresearch"
     ):
         raise RuntimeError("experiment config schema must be 1")
     dataset = config["dataset"]
@@ -397,23 +457,28 @@ def _validate_config(config: dict[str, Any]) -> None:
     }:
         raise RuntimeError("student sampling invariants changed")
     objective = config["objective"]
+    objective_lambda = objective.get("lambda")
+    if (
+        isinstance(objective_lambda, bool)
+        or not isinstance(objective_lambda, int)
+        or objective_lambda not in ALLOWED_ALLOCATIONS
+    ):
+        raise RuntimeError("objective lambda must be one of 1, 2, 5, or 10")
     if objective != {
-        "lambda": 1,
+        "lambda": objective_lambda,
         "train_denominator": 8,
         "heldout_questions": 10,
         "heldout_denominator": 80,
         "comparison": ["higher_J", "higher_heldout", "shorter_hint"],
     }:
         raise RuntimeError("objective invariants changed")
-    if config["budget"] != {
-        "max_rounds": 6,
-        "stop_after_consecutive_zero_keep_rounds": 3,
-    }:
+    if config["budget"] != {"max_rounds": 20}:
         raise RuntimeError("experiment budget changed")
     slurm = config["slurm"]
+    partition, nodes = ALLOWED_ALLOCATIONS[objective_lambda]
     if slurm != {
-        "partition": "ml.p5.48xlarge",
-        "nodes": ["ip-10-1-38-11", "ip-10-1-81-8"],
+        "partition": partition,
+        "nodes": list(nodes),
         "exclusive": True,
         "gpus_per_node": 8,
         "pool_slots": 16,
@@ -423,17 +488,30 @@ def _validate_config(config: dict[str, Any]) -> None:
         "memory": "0",
         "time": "1-00:00:00",
     }:
-        raise RuntimeError("two-node H100 allocation changed")
+        raise RuntimeError(
+            f"two-node allocation changed for lambda={objective_lambda}"
+        )
     if config["publication"] != {
         "remote": "origin",
-        "commit_prefix": "autoresearch: hinter round",
+        "commit_prefix": (
+            f"autoresearch: hinter lambda-{objective_lambda} round"
+        ),
     }:
         raise RuntimeError("publication settings changed")
 
 
 def load_config(*, require_frozen: bool = False) -> tuple[dict[str, Any], str]:
-    config = load_json(CONFIG_PATH)
+    config = _apply_environment_overrides(load_json(CONFIG_PATH))
     _validate_config(config)
+    expected_lambda = WORKSPACE_LAMBDAS.get(WORK_ROOT.name)
+    if (
+        expected_lambda is not None
+        and config["objective"]["lambda"] != expected_lambda
+    ):
+        raise RuntimeError(
+            f"workspace {WORK_ROOT.name} is reserved for lambda="
+            f"{expected_lambda}, not lambda={config['objective']['lambda']}"
+        )
     config_hash = sha256_bytes(canonical_json_bytes(config))
     if require_frozen:
         if not LOCK_PATH.exists():
@@ -620,7 +698,12 @@ def validate_book(
     }
 
 
-def exact_metrics(train_correct: int, heldout_correct: int) -> dict[str, Any]:
+def exact_metrics(
+    train_correct: int,
+    heldout_correct: int,
+    *,
+    objective_lambda: int = 1,
+) -> dict[str, Any]:
     if (
         isinstance(train_correct, bool)
         or not isinstance(train_correct, int)
@@ -633,7 +716,13 @@ def exact_metrics(train_correct: int, heldout_correct: int) -> dict[str, Any]:
         or not 0 <= heldout_correct <= 80
     ):
         raise ValueError("heldout_correct must be an integer in [0, 80]")
-    numerator = train_correct * 10 + heldout_correct
+    if (
+        isinstance(objective_lambda, bool)
+        or not isinstance(objective_lambda, int)
+        or objective_lambda not in ALLOWED_ALLOCATIONS
+    ):
+        raise ValueError("objective_lambda must be one of 1, 2, 5, or 10")
+    numerator = train_correct * 10 + objective_lambda * heldout_correct
     return {
         "train_correct": train_correct,
         "train_total": 8,
@@ -647,7 +736,11 @@ def exact_metrics(train_correct: int, heldout_correct: int) -> dict[str, Any]:
     }
 
 
-def validate_private_metrics(value: dict[str, Any]) -> None:
+def validate_private_metrics(
+    value: dict[str, Any],
+    *,
+    objective_lambda: int = 1,
+) -> None:
     require_exact_keys(value, PRIVATE_RESULT_KEYS, "private result")
     train_correct = value["train_correct"]
     heldout_correct = value["heldout_correct"]
@@ -661,6 +754,7 @@ def validate_private_metrics(value: dict[str, Any]) -> None:
     recomputed = exact_metrics(
         train_correct,
         heldout_correct,
+        objective_lambda=objective_lambda,
     )
     for key, expected in recomputed.items():
         if value[key] != expected:
@@ -684,6 +778,8 @@ def validate_registered_training_packet(
     assert match is not None
     round_number = int(match.group(1))
     hint_id = int(match.group(2))
+    if round_number > int(config["budget"]["max_rounds"]):
+        raise ValueError("training task exceeds the round budget")
     expected_path = (
         root / "rounds" / f"{round_number:03d}"
         / "training_inputs" / f"hint_{hint_id:02d}.json"
@@ -715,7 +811,10 @@ def validate_registered_training_packet(
     ):
         raise ValueError("best-per-hint ledger is stale")
     metrics = best["hints"][hint_id - 1]["metrics"]
-    validate_private_metrics(metrics)
+    validate_private_metrics(
+        metrics,
+        objective_lambda=int(config["objective"]["lambda"]),
+    )
     expected = {
         "schema_version": 1,
         "round": round_number,
@@ -846,7 +945,7 @@ def validate_registered_private_input(
         }
     else:
         match = re.fullmatch(
-            r"r(0[1-6])-private-h(0[1-9]|10)",
+            rf"r({ROUND_ID_PATTERN})-private-h(0[1-9]|10)",
             task_id,
         )
         assert match is not None

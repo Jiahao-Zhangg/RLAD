@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "name": "parallel-10-hint-book-p5-pilot",
+  "name": "parallel-10-hint-book-autoresearch",
   "dataset": {
     "repo_id": "zjhhhh/DeepScaleR-Qwen3-1.7B-2k-strategy-error-200",
     "revision": "1764f5c2ed03ddd7a9b7b9d9252e62f1e8fab3a6",
@@ -90,8 +90,7 @@
     "hard_total_tokens": 2048
   },
   "budget": {
-    "max_rounds": 6,
-    "stop_after_consecutive_zero_keep_rounds": 3
+    "max_rounds": 20
   },
   "slurm": {
     "partition": "ml.p5.48xlarge",
@@ -110,6 +109,6 @@
   },
   "publication": {
     "remote": "origin",
-    "commit_prefix": "autoresearch: hinter round"
+    "commit_prefix": "autoresearch: hinter lambda-1 round"
   }
 }

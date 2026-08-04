@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 import shutil
 import subprocess
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -17,6 +19,7 @@ from .core import (
     REPO_ROOT,
     RESEARCH_ROOT,
     WORK_ROOT,
+    WORKSPACE_LAMBDAS,
     atomic_write_bytes,
     atomic_write_json,
     load_config,
@@ -177,6 +180,49 @@ def _staged_paths() -> set[str]:
         for line in _git("diff", "--cached", "--name-only").splitlines()
         if line
     }
+
+
+def _unexpected_changes(allowed: set[str]) -> list[str]:
+    """Ignore only unstaged state owned by another isolated lambda run."""
+    current_workspace = str(WORK_ROOT.relative_to(REPO_ROOT))
+    unexpected = []
+    for path in _changed_paths() - allowed:
+        workspace = path.split("/", 1)[0]
+        if workspace in WORKSPACE_LAMBDAS and workspace != current_workspace:
+            continue
+        unexpected.append(path)
+    return sorted(unexpected)
+
+
+@contextmanager
+def _repo_publication_lock() -> Any:
+    """Serialize index/commit/push transactions across lambda workspaces."""
+    common_dir = Path(_git("rev-parse", "--git-common-dir"))
+    if not common_dir.is_absolute():
+        common_dir = (REPO_ROOT / common_dir).resolve()
+    lock_path = common_dir / "rlad-autoresearch-publish.lock"
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            outstanding = [
+                workspace
+                for workspace in WORKSPACE_LAMBDAS
+                if workspace != WORK_ROOT.name
+                and (
+                    REPO_ROOT
+                    / workspace
+                    / "publication"
+                    / "git_transaction.json"
+                ).is_file()
+            ]
+            if outstanding:
+                raise RuntimeError(
+                    "another lambda run must recover its publication "
+                    f"transaction first: {outstanding}"
+                )
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _transaction_path() -> Path:
@@ -371,10 +417,12 @@ def _validate_existing_receipt(
         or receipt["pushed_epoch"] <= 0
     ):
         raise RuntimeError("stored publication receipt is invalid")
+    workspace_prefix = str(WORK_ROOT.relative_to(REPO_ROOT))
     required_path = (
-        f"work_zsw/research/rounds/{round_number:03d}/metrics.json"
+        f"{workspace_prefix}/research/rounds/"
+        f"{round_number:03d}/metrics.json"
         if round_number > 0
-        else "work_zsw/research/final_book.json"
+        else f"{workspace_prefix}/research/final_book.json"
     )
     if required_path not in receipt["paths"]:
         raise RuntimeError("publication receipt omits its required result")
@@ -438,7 +486,7 @@ def _commit_and_push(
             raise RuntimeError(
                 "refusing publication with an unregistered staged index"
             )
-        unexpected = sorted(_changed_paths() - allowed)
+        unexpected = _unexpected_changes(allowed)
         if unexpected:
             raise RuntimeError(
                 "refusing to publish with unrelated visible changes: "
@@ -463,7 +511,7 @@ def _commit_and_push(
             "publication transaction found disallowed staged paths: "
             f"{sorted(unexpected_staged)}"
         )
-    unexpected = sorted(_changed_paths() - allowed)
+    unexpected = _unexpected_changes(allowed)
     if unexpected:
         raise RuntimeError(
             "refusing to publish with unrelated visible changes: "
@@ -573,7 +621,7 @@ def _publish_round_zero_terminal(
     return {**terminal, "reused": False}
 
 
-def publish_round(round_number: int) -> dict[str, Any]:
+def _publish_round_locked(round_number: int) -> dict[str, Any]:
     config, config_hash = load_config(require_frozen=True)
     if round_number < 0:
         raise ValueError("round number must not be negative")
@@ -674,6 +722,11 @@ def publish_round(round_number: int) -> dict[str, Any]:
     ):
         _request_pool_drain()
     return {**receipt, "reused": False}
+
+
+def publish_round(round_number: int) -> dict[str, Any]:
+    with _repo_publication_lock():
+        return _publish_round_locked(round_number)
 
 
 def main() -> None:

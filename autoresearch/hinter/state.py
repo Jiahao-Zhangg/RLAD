@@ -29,6 +29,7 @@ from .core import (
     refuse_existing,
     reject_answer_leak,
     require_exact_keys,
+    sha256_file,
     tokenizer_factory,
     validate_book,
     validate_hint,
@@ -225,6 +226,7 @@ def _private_result(
     receipt_path: Path,
     task_id: str,
     config_hash: str,
+    objective_lambda: int,
 ) -> tuple[dict[str, Any], str]:
     request = load_json(input_path)
     require_exact_keys(request, PRIVATE_INPUT_KEYS, "private input")
@@ -239,7 +241,10 @@ def _private_result(
         raise RuntimeError(f"private input changed for hint {hint_row['hint_id']}")
     result = load_json(output_path)
     require_exact_keys(result, PRIVATE_RESULT_KEYS, "private result")
-    validate_private_metrics(result)
+    validate_private_metrics(
+        result,
+        objective_lambda=objective_lambda,
+    )
     if (
         result["hint_id"] != hint_row["hint_id"]
         or result["hint_hash"] != hint_row["hint_hash"]
@@ -265,7 +270,7 @@ def initialize_metrics(
     receipt_dir: Path,
     task_prefix: str,
 ) -> dict[str, Any]:
-    _, config_hash = load_config(require_frozen=True)
+    config, config_hash = load_config(require_frozen=True)
     book = _book(RESEARCH_ROOT / "current_book.json")
     target = RESEARCH_ROOT / "best_per_hint.json"
     if target.exists():
@@ -283,6 +288,7 @@ def initialize_metrics(
             receipt_path=receipt_dir / f"hint_{hint_id:02d}.json",
             task_id=f"{task_prefix}-h{hint_id:02d}",
             config_hash=config_hash,
+            objective_lambda=int(config["objective"]["lambda"]),
         )
         if execution_id in execution_ids:
             raise RuntimeError("baseline evaluator reused a Slurm step")
@@ -368,7 +374,10 @@ def _best() -> dict[str, Any]:
         ):
             raise RuntimeError("best-per-hint text identity is stale")
         total_tokens += tokens
-        validate_private_metrics(row["metrics"])
+        validate_private_metrics(
+            row["metrics"],
+            objective_lambda=int(config["objective"]["lambda"]),
+        )
         if row["metrics"]["hint_hash"] != row["hint_hash"]:
             raise RuntimeError("incumbent metrics do not match hint")
     if total_tokens > int(config["hint_limits"]["hard_total_tokens"]):
@@ -405,8 +414,9 @@ def _require_previous_publication(
         "publication receipt",
     )
     commit = receipt["commit"]
+    workspace_prefix = str(WORK_ROOT.relative_to(WORK_ROOT.parent))
     expected_metrics = (
-        f"work_zsw/research/rounds/{previous:03d}/metrics.json"
+        f"{workspace_prefix}/research/rounds/{previous:03d}/metrics.json"
     )
     if (
         receipt["schema_version"] != 1
@@ -425,6 +435,116 @@ def _require_previous_publication(
         or receipt["pushed_epoch"] <= 0
     ):
         raise RuntimeError("previous round publication receipt is invalid")
+
+
+def _history_artifact(path: Path) -> dict[str, str]:
+    resolved = path.resolve()
+    if not resolved.is_relative_to(WORK_ROOT):
+        raise RuntimeError(f"worker-history artifact escapes workspace: {path}")
+    if not path.is_file() or path.is_symlink():
+        raise RuntimeError(f"worker-history artifact is missing or unsafe: {path}")
+    return {
+        "path": str(resolved.relative_to(WORK_ROOT)),
+        "sha256": sha256_file(resolved),
+    }
+
+
+def _optional_history_artifact(path: Path) -> dict[str, str] | None:
+    if not path.is_file():
+        return None
+    return _history_artifact(path)
+
+
+def _same_question_history(
+    *,
+    round_number: int,
+    hint: dict[str, Any],
+    incumbent: dict[str, Any],
+    packet_path: Path,
+    config_hash: str,
+    objective_lambda: int,
+) -> dict[str, Any]:
+    """Build the held-out-safe, same-question context for one worker."""
+    hint_id = int(hint["hint_id"])
+    stem = f"hint_{hint_id:02d}.json"
+    baseline = RESEARCH_ROOT / "baseline"
+    baseline_artifacts = [
+        _history_artifact(baseline / directory / stem)
+        for directory in ("inputs", "outputs", "receipts")
+    ]
+    prior_rounds = []
+    for previous in range(1, round_number):
+        prior_dir = RESEARCH_ROOT / "rounds" / f"{previous:03d}"
+        metrics = load_json(prior_dir / "metrics.json")
+        records = [
+            row
+            for row in metrics["records"]
+            if row.get("hint_id") == hint_id
+        ]
+        history_rows = [
+            row
+            for row in metrics["history_rows"]
+            if row.get("hint_id") == hint_id
+        ]
+        if len(records) != 1 or len(history_rows) != 1:
+            raise RuntimeError(
+                f"round {previous} lacks unique history for hint {hint_id}"
+            )
+        artifacts = [
+            _history_artifact(prior_dir / directory / stem)
+            for directory in (
+                "training_inputs",
+                "training_outputs",
+                "training_receipts",
+                "worker_proposals",
+                "proposal_private_inputs",
+                "proposal_private_outputs",
+                "proposal_private_receipts",
+                "worker_history",
+            )
+        ]
+        task_id = f"r{previous:02d}-train-h{hint_id:02d}"
+        for suffix in ("out", "err"):
+            optional = _optional_history_artifact(
+                WORK_ROOT / "logs" / "tasks" / f"{task_id}.{suffix}"
+            )
+            if optional is not None:
+                artifacts.append(optional)
+        book_snapshots = {}
+        for name in ("book_before", "book_proposals", "book_after"):
+            book = load_json(prior_dir / f"{name}.json")
+            rows = [
+                row
+                for row in book.get("hints", [])
+                if row.get("hint_id") == hint_id
+            ]
+            if len(rows) != 1:
+                raise RuntimeError(
+                    f"round {previous} {name} lacks hint {hint_id}"
+                )
+            book_snapshots[name] = rows[0]
+        prior_rounds.append(
+            {
+                "round": previous,
+                "artifacts": artifacts,
+                "book_snapshots": book_snapshots,
+                "decision_record": records[0],
+                "history_row": history_rows[0],
+            }
+        )
+    return {
+        "schema_version": 1,
+        "config_hash": config_hash,
+        "round": round_number,
+        "hint_id": hint_id,
+        "train_position": hint["train_position"],
+        "train_qid": hint["train_qid"],
+        "objective_lambda": objective_lambda,
+        "current_training_input": _history_artifact(packet_path),
+        "baseline_artifacts": baseline_artifacts,
+        "incumbent_history": incumbent["history"],
+        "prior_rounds": prior_rounds,
+    }
 
 
 def prepare_round(round_number: int) -> Path:
@@ -446,6 +566,7 @@ def prepare_round(round_number: int) -> Path:
         "training_inputs",
         "training_outputs",
         "training_receipts",
+        "worker_history",
         "worker_proposals",
         "proposal_private_inputs",
         "proposal_private_outputs",
@@ -517,6 +638,23 @@ def prepare_round(round_number: int) -> Path:
                 raise RuntimeError(f"training packet drift: {packet_path}")
         else:
             atomic_write_json(packet_path, packet)
+        history_path = (
+            round_dir / "worker_history"
+            / f"hint_{hint['hint_id']:02d}.json"
+        )
+        history = _same_question_history(
+            round_number=round_number,
+            hint=hint,
+            incumbent=incumbent,
+            packet_path=packet_path,
+            config_hash=config_hash,
+            objective_lambda=int(config["objective"]["lambda"]),
+        )
+        if history_path.exists():
+            if load_json(history_path) != history:
+                raise RuntimeError(f"worker history drift: {history_path}")
+        else:
+            atomic_write_json(history_path, history)
     return round_dir
 
 
@@ -908,7 +1046,10 @@ def _validate_finalization_transaction(
         ):
             if best_row[key] != final_hint[key]:
                 raise RuntimeError("finalization book/best ledger disagree")
-        validate_private_metrics(best_row["metrics"])
+        validate_private_metrics(
+            best_row["metrics"],
+            objective_lambda=int(config["objective"]["lambda"]),
+        )
         if (
             best_row["metrics"]["hint_hash"] != best_row["hint_hash"]
             or not isinstance(best_row["history"], list)
@@ -992,6 +1133,7 @@ def finalize_round(round_number: int, notes: str = "") -> dict[str, Any]:
             / f"hint_{hint_id:02d}.json",
             task_id=f"r{round_number:02d}-private-h{hint_id:02d}",
             config_hash=config_hash,
+            objective_lambda=int(config["objective"]["lambda"]),
         )
         if execution_id in execution_ids:
             raise RuntimeError("proposal evaluators reused a Slurm step")
@@ -1296,7 +1438,6 @@ def stopping_status() -> dict[str, Any]:
             or stopped["should_stop"] is not True
             or stopped["reason"] not in {
                 "round_budget_exhausted",
-                "three_consecutive_zero_keep_rounds",
                 "human_stop",
             }
             or not (RESEARCH_ROOT / "final_book.json").is_file()
@@ -1307,14 +1448,9 @@ def stopping_status() -> dict[str, Any]:
             for key, value in stopped.items()
             if key != "schema_version"
         }
-    threshold = int(
-        config["budget"]["stop_after_consecutive_zero_keep_rounds"]
-    )
     reason = None
     if len(completed) >= max_rounds:
         reason = "round_budget_exhausted"
-    elif zero_kept >= threshold:
-        reason = "three_consecutive_zero_keep_rounds"
     return {
         "completed_rounds": len(completed),
         "last_round": completed[-1] if completed else 0,

@@ -126,19 +126,23 @@ def start_pool(*, restart: bool = False) -> dict[str, Any]:
 
     slurm = config["slurm"]
     nodes = ",".join(slurm["nodes"])
+    pool_slots = int(slurm["pool_slots"])
+    gpus_per_node = int(slurm["gpus_per_node"])
     command = [
         "sbatch",
         "--parsable",
         f"--partition={slurm['partition']}",
         "--nodes=2",
-        "--ntasks=16",
-        "--ntasks-per-node=8",
-        f"--gpus-per-node={slurm['gpus_per_node']}",
+        f"--ntasks={pool_slots}",
+        f"--ntasks-per-node={gpus_per_node}",
+        f"--gpus-per-node={gpus_per_node}",
         f"--cpus-per-task={slurm['cpus_per_step']}",
         f"--mem={slurm['memory']}",
         "--exclusive",
         f"--nodelist={nodes}",
         f"--time={slurm['time']}",
+        f"--output={WORK_ROOT / 'logs' / 'pool_%j.out'}",
+        f"--error={WORK_ROOT / 'logs' / 'pool_%j.err'}",
         "--export="
         + ",".join(
             [
@@ -150,12 +154,19 @@ def start_pool(*, restart: bool = False) -> dict[str, Any]:
         ),
         str(SBATCH_SCRIPT),
     ]
+    environment = os.environ.copy()
+    environment["RLAD_AUTORESEARCH_LAMBDA"] = str(
+        config["objective"]["lambda"]
+    )
+    environment["RLAD_AUTORESEARCH_PARTITION"] = slurm["partition"]
+    environment["RLAD_AUTORESEARCH_NODES"] = nodes
     completed = subprocess.run(
         command,
         check=True,
         capture_output=True,
         text=True,
         cwd=REPO_ROOT,
+        env=environment,
     )
     raw = completed.stdout.strip()
     job_id = raw.split(";", 1)[0]
@@ -186,7 +197,7 @@ def start_pool(*, restart: bool = False) -> dict[str, Any]:
 def _inside_work(path: Path) -> Path:
     resolved = path.resolve()
     if not resolved.is_relative_to(WORK_ROOT):
-        raise ValueError(f"pool path escapes work_zsw: {resolved}")
+        raise ValueError(f"pool path escapes autoresearch workspace: {resolved}")
     return resolved
 
 
@@ -633,7 +644,7 @@ def dispatch() -> int:
         for gpu_index in range(int(config["slurm"]["gpus_per_node"]))
     ]
     if len(slots) != max_active:
-        raise RuntimeError("configured H100 slot count is inconsistent")
+        raise RuntimeError("configured GPU slot count is inconsistent")
     while True:
         for task_id, (
             process,

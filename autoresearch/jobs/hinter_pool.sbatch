@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=rlad-hinter-pool
-#SBATCH --output=work_zsw/logs/pool_%j.out
-#SBATCH --error=work_zsw/logs/pool_%j.err
-#SBATCH --partition=ml.p5.48xlarge
+# The dispatcher supplies partition, nodelist, and workspace-specific log paths.
+#SBATCH --output=/tmp/rlad-hinter-pool-%j.out
+#SBATCH --error=/tmp/rlad-hinter-pool-%j.err
 #SBATCH --nodes=2
 #SBATCH --ntasks=16
 #SBATCH --ntasks-per-node=8
@@ -10,7 +10,6 @@
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=0
 #SBATCH --exclusive
-#SBATCH --nodelist=ip-10-1-38-11,ip-10-1-81-8
 #SBATCH --time=1-00:00:00
 
 set -euo pipefail

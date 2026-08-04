@@ -2,8 +2,8 @@
 
 The agent lives on the login node. Every Qwen student call is enqueued into a
 two-node exclusive Slurm allocation and executed as an exact one-GPU `srun`
-step. State is resume-safe under `work_zsw/`; completed-round public ledgers are
-committed and pushed to GitHub before the next round begins.
+step. State is resume-safe under an isolated workspace; completed-round public
+ledgers are committed and pushed to GitHub before the next round begins.
 
 Run from the RLAD repository root:
 
@@ -30,12 +30,14 @@ from claude_agent_sdk.types import (
     ToolUseBlock,
 )
 
+from autoresearch.hinter.core import WORK_ROOT, load_config
+
 
 log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLAN_PATH = REPO_ROOT / "docs" / "plan" / "hinter.md"
-WORK_DIR = REPO_ROOT / "work_zsw"
+WORK_DIR = WORK_ROOT
 TRANSCRIPT = WORK_DIR / "agent_transcript.jsonl"
 MODEL = (
     "us.anthropic.claude-opus-4-8"
@@ -47,38 +49,52 @@ SESSION_NAMESPACE = uuid.UUID("3e3924da-70ad-47fc-a1fa-28c873f5fbd3")
 
 
 def _session_uuid() -> str:
-    return str(uuid.uuid5(SESSION_NAMESPACE, "rlad-hinter-work-zsw"))
+    workspace = WORK_DIR.relative_to(REPO_ROOT)
+    return str(uuid.uuid5(SESSION_NAMESPACE, f"rlad-hinter-{workspace}"))
 
 
 def _build_prompt() -> str:
     plan = PLAN_PATH.relative_to(REPO_ROOT)
+    config, _ = load_config(require_frozen=False)
+    workspace = str(WORK_DIR.relative_to(REPO_ROOT))
+    objective_lambda = int(config["objective"]["lambda"])
+    max_rounds = int(config["budget"]["max_rounds"])
+    partition = config["slurm"]["partition"]
+    nodes = ", ".join(config["slurm"]["nodes"])
     return f"""\
 ultracode
 
 You are the autonomous research engineer for the RLAD 10-hint autoresearch
 experiment. Your cwd is the RLAD repository root. Read `{plan}` END TO END
 before doing anything and treat it as the governing contract. The only
-optimization levers are the ten hint texts.
+optimization levers are the ten hint texts. This run uses lambda =
+{objective_lambda}, so J_i = train_i + {objective_lambda} * heldout_i. It must
+complete exactly {max_rounds} rounds unless the human explicitly stops it.
 
 Use only the portable implementation under `autoresearch/` and the runtime
-workspace `work_zsw/`. Never read or modify the older `work/` experiment.
+workspace `{workspace}/`. Never read or modify `work/` or another autoresearch
+workspace.
 
 ## Absolute safety constraints
 
 - Never run Qwen/vLLM student inference on the login node.
 - Start the two-node pool with
   `uv run --project autoresearch python -m autoresearch.hinter.pool start`.
-  It exclusively reserves `ip-10-1-38-11` and `ip-10-1-81-8` in partition
-  `ml.p5.48xlarge` (8 H100s each). Every actual inference is a distinct
+  It exclusively reserves `{nodes}` in partition `{partition}` (8 GPUs each).
+  Every actual inference is a distinct
   one-GPU `srun` step. Do not bypass this queue.
 - Never inspect, print, summarize, or send to a subagent any held-out problem,
   answer, rollout, per-question reward, or winning question-hint pairing.
   Private evaluator output is aggregate-only. Do not read the source dataset,
   HF dataset cache, private task logs, or private evaluator internals to learn
   hidden rows.
-- Each worker may read only its own public training packet, own training
-  output/receipt, and own task log if its job fails. It may not read another
-  worker's files or any private evaluator artifact.
+- Each worker may read its own current public training packet; its own current
+  training output/receipt/log; and its `worker_history/hint_ii.json` manifest
+  plus every same-question artifact explicitly listed by that manifest. The
+  manifest contains all prior held-out-safe history for that question,
+  including prior training rollouts and aggregate-only private scores. It may
+  not read another worker's files, an unlisted private evaluator artifact, or
+  any private task log.
 - Hints must be reusable strategy, not answers or full solutions. Each worker
   proposal must differ from its incumbent and remain <=200 Qwen tokens so any
   independently assembled book remains <=2048.
@@ -88,18 +104,19 @@ workspace `work_zsw/`. Never read or modify the older `work/` experiment.
 
 ## Preflight and one-time setup
 
-1. Verify `git status --short` has no tracked/unignored changes, the current
-   named branch has a writable `origin`, `gh auth status` passes, `HF_TOKEN` is
-   available if the pinned files are not cached, and `codex` is installed.
-   The round publisher deliberately refuses unrelated changes. Do not stage
-   or commit unrelated files.
+1. Verify `git status --short` has no tracked/unignored changes outside other
+   isolated `work_zsw*` autoresearch runs, the current named branch has a
+   writable `origin`, `gh auth status` passes, `HF_TOKEN` is available if the
+   pinned files are not cached, and `codex` is installed. The round publisher
+   serializes lambda-run checkpoints and refuses every other unrelated change.
+   Do not stage or commit unrelated files.
 2. Run:
    `uv run --project autoresearch python -m autoresearch.hinter.bootstrap run`
 3. Start/reuse the pool. Enqueue both setup gates exactly:
 
-   `uv run --project autoresearch python -m autoresearch.hinter.pool enqueue --task-id setup-smoke --mode smoke --input work_zsw/research/setup/smoke_input.json --output work_zsw/research/setup/smoke_output.json --receipt work_zsw/research/setup/smoke_receipt.json`
+   `uv run --project autoresearch python -m autoresearch.hinter.pool enqueue --task-id setup-smoke --mode smoke --input {workspace}/research/setup/smoke_input.json --output {workspace}/research/setup/smoke_output.json --receipt {workspace}/research/setup/smoke_receipt.json`
 
-   `uv run --project autoresearch python -m autoresearch.hinter.pool enqueue --task-id setup-private-smoke --mode private-smoke --input work_zsw/research/setup/private_smoke_input.json --output work_zsw/research/setup/private_smoke_output.json --receipt work_zsw/research/setup/private_smoke_receipt.json`
+   `uv run --project autoresearch python -m autoresearch.hinter.pool enqueue --task-id setup-private-smoke --mode private-smoke --input {workspace}/research/setup/private_smoke_input.json --output {workspace}/research/setup/private_smoke_output.json --receipt {workspace}/research/setup/private_smoke_receipt.json`
 
    Monitor both with `autoresearch.hinter.pool wait`. If the allocation is
    pending, wait. If a step fails, inspect only its implementation log, fix an
@@ -115,7 +132,7 @@ workspace `work_zsw/`. Never read or modify the older `work/` experiment.
    leakage, exact grader use, shared sampling, one-GPU step enforcement,
    aggregation, tie-breaks, publication allowlisting, and resume safety.
    The reviewer must not inspect held-out details. On PASS, save
-   `work_zsw/review/independent_review.json` with exact keys:
+   `{workspace}/review/independent_review.json` with exact keys:
    `schema_version, verdict, reviewer, reviewed_epoch, config_hash,
    source_sha256, source_bundle_hash, heldout_details_inspected, findings`.
    Use reviewer=`codex`, verdict=`pass`, and
@@ -130,8 +147,8 @@ workspace `work_zsw/`. Never read or modify the older `work/` experiment.
 6. Initialize the seed book:
    `uv run --project autoresearch python -m autoresearch.hinter.state init-book --hints autoresearch/initial_hints.json`
 7. Create and score the baseline:
-   - private-inputs from `work_zsw/research/initial_book.json` into
-     `work_zsw/research/baseline/inputs`;
+   - private-inputs from `{workspace}/research/initial_book.json` into
+     `{workspace}/research/baseline/inputs`;
    - enqueue-private with outputs/receipts in the sibling baseline directories
      and task-prefix `baseline`;
    - wait for `baseline-h01` through `baseline-h10`;
@@ -147,7 +164,9 @@ For round R:
 1. Run `autoresearch.hinter.state prepare-round --round R`.
 2. Launch EXACTLY TEN Task/Workflow subagents concurrently, one per hint.
    Do not sequentially do their reasoning yourself. Worker i must:
-   - read only `work_zsw/research/rounds/RRR/training_inputs/hint_ii.json`;
+   - read `{workspace}/research/rounds/RRR/training_inputs/hint_ii.json` and
+     `{workspace}/research/rounds/RRR/worker_history/hint_ii.json`, then inspect
+     every relevant same-question prior artifact listed by that manifest;
    - independently enqueue task `rRR-train-hii`, mode=train, with its matching
      training input/output/receipt paths;
    - monitor that task until done (never infer locally);
@@ -167,13 +186,17 @@ For round R:
    inspect private logs or hidden details.
 5. Run `autoresearch.hinter.state finalize-round --round R`. Decisions are
    independent per hint: higher J, then higher aggregate held-out, then shorter.
-6. Run stopping-status. If it says stop, run seal-final before publication.
+6. Run stopping-status. It must remain false through round {max_rounds - 1},
+   regardless of how many consecutive rounds keep zero hints. After round
+   {max_rounds}, run seal-final before publication.
 7. MANDATORY CHECKPOINT: run
    `uv run --project autoresearch python -m autoresearch.hinter.publish --round R`.
-   Do not begin R+1 until the commit has successfully pushed to GitHub.
-8. If stopping-status is false, immediately begin the next round. Continue
-   until three consecutive zero-keep rounds, the six-round budget, or the human
-   stops you.
+   Do not begin R+1 until the commit has successfully pushed to GitHub. If a
+   different lambda workspace is recovering its serialized Git transaction,
+   wait and retry this publisher; never bypass the transaction gate.
+8. After every round before {max_rounds}, immediately begin the next round.
+   Zero-keep rounds are not a stopping condition. Continue until all
+   {max_rounds} rounds finish or the human explicitly stops you.
 
 If the human asks to stop, do not start new work. Run
 `autoresearch.hinter.state seal-final --human-stop`, then call the publisher
@@ -181,12 +204,12 @@ again for the last completed round (use `--round 0` if no research round has
 finished). It will create a terminal-only checkpoint if that round was already
 pushed. Terminal publication requests a pool drain;
 confirm with `autoresearch.hinter.pool status` that the allocation becomes
-terminal so the 16 H100s are released. A persisted `STOPPED.json` is
+terminal so the 16 GPUs are released. A persisted `STOPPED.json` is
 authoritative and must never be resumed.
 
 ## Persistence
 
-Append-only state lives in `work_zsw/`. The SDK transcript is ignored by git.
+Append-only state lives in `{workspace}/`. The SDK transcript is ignored by git.
 Only held-out-safe books, aggregate metrics, and CSV decision logs are eligible
 for the publisher. On resume, inspect stopping-status, pool status, task states,
 and round files; continue the incomplete unit without duplicating a task,

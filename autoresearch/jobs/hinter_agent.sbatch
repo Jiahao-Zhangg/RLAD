@@ -1,13 +1,13 @@
 #!/bin/bash
-# Submit from the RLAD root on a non-H100 coordinator partition:
+# Submit from the RLAD root on a non-GPU coordinator partition:
 #
 #   sbatch --partition=<cpu-or-service-partition> \
 #     --export=ALL,RLAD_REPO_ROOT="$PWD" \
 #     autoresearch/jobs/hinter_agent.sbatch
 #
-# Do not submit this wrapper to ml.p5.48xlarge.  The SDK coordinator launches
+# Do not submit this wrapper to a p4d/p5 GPU partition. The SDK coordinator launches
 # autoresearch/jobs/hinter_pool.sbatch as a separate exclusive allocation for
-# the two named 8xH100 nodes.
+# the configured pair of 8-GPU nodes.
 #
 #SBATCH --job-name=rlad-hinter-agent
 #SBATCH --nodes=1
@@ -17,8 +17,8 @@
 #SBATCH --time=2-00:00:00
 #SBATCH --open-mode=append
 #SBATCH --signal=B:TERM@120
-#SBATCH --output=work_zsw/agent_%j.out
-#SBATCH --error=work_zsw/agent_%j.err
+#SBATCH --output=/tmp/rlad-hinter-agent-%j.out
+#SBATCH --error=/tmp/rlad-hinter-agent-%j.err
 
 set -euo pipefail
 umask 077
@@ -34,11 +34,22 @@ if [[ ! -f "${repo_root}/autoresearch/run_hinter_agent.py" ]]; then
     exit 2
 fi
 cd "${repo_root}"
+work_root="${RLAD_AUTORESEARCH_WORK:-${repo_root}/work_zsw}"
+work_root="$(cd "$(dirname "${work_root}")" && pwd)/$(basename "${work_root}")"
+case "$(basename "${work_root}")" in
+    work_zsw|work_zsw_lambda2|work_zsw_lambda5|work_zsw_lambda10) ;;
+    *)
+        echo "ERROR: unsupported autoresearch workspace: ${work_root}" >&2
+        exit 2
+        ;;
+esac
+mkdir -p "${work_root}"
+export RLAD_AUTORESEARCH_WORK="${work_root}"
 
 active_pid=""
 request_pool_stop() {
-    local allocation_path="${repo_root}/work_zsw/pool/allocation.json"
-    local stop_path="${repo_root}/work_zsw/pool/control/STOP"
+    local allocation_path="${work_root}/pool/allocation.json"
+    local stop_path="${work_root}/pool/control/STOP"
     local stop_tmp="${stop_path}.tmp.${SLURM_JOB_ID:-nojob}.$$"
     if [[ ! -f "${allocation_path}" ]]; then
         return
@@ -84,15 +95,16 @@ trap handle_signal TERM INT
 
 coordinator_partition="${SLURM_JOB_PARTITION:-}"
 coordinator_host="$(hostname -s)"
-if [[ "${coordinator_partition}" == "ml.p5.48xlarge" ]]; then
-    echo "ERROR: the SDK coordinator must not occupy ml.p5.48xlarge" >&2
-    echo "Submit this wrapper to a non-H100 CPU/service partition." >&2
+if [[ "${coordinator_partition}" == "ml.p5.48xlarge" ||
+      "${coordinator_partition}" == "ml.p4d.24xlarge" ]]; then
+    echo "ERROR: the SDK coordinator must not occupy a GPU pool partition" >&2
+    echo "Submit this wrapper to a non-GPU CPU/service partition." >&2
     exit 2
 fi
 case "${coordinator_host}" in
-    ip-10-1-38-11|ip-10-1-81-8)
-        echo "ERROR: coordinator landed on reserved H100 host ${coordinator_host}" >&2
-        echo "Use a non-H100 CPU/service partition." >&2
+    ip-10-1-173-179|ip-10-1-184-205|ip-10-1-196-96|ip-10-1-226-48|ip-10-1-38-11|ip-10-1-81-8)
+        echo "ERROR: coordinator landed on reserved GPU host ${coordinator_host}" >&2
+        echo "Use a non-GPU CPU/service partition." >&2
         exit 2
         ;;
 esac
@@ -140,12 +152,12 @@ if [[ "${resume}" == "1" ]]; then
     if [[ "${has_resume}" == "0" ]]; then
         agent_args+=(--resume)
     fi
-elif [[ -f "work_zsw/agent_transcript.jsonl" ]]; then
+elif [[ -f "${work_root}/agent_transcript.jsonl" ]]; then
     echo "ERROR: an SDK transcript already exists; relaunch with --resume" >&2
     exit 2
 fi
 
-if [[ -f "work_zsw/research/STOPPED.json" ]]; then
+if [[ -f "${work_root}/research/STOPPED.json" ]]; then
     echo "Autoresearch is already sealed; nothing to launch."
     exit 0
 fi
@@ -175,7 +187,7 @@ else
     agent_status="$?"
 fi
 
-if [[ ! -f "work_zsw/research/STOPPED.json" ]]; then
+if [[ ! -f "${work_root}/research/STOPPED.json" ]]; then
     echo "SDK agent exited before sealing the experiment." >&2
     if [[ "${agent_status}" == "0" ]]; then
         agent_status=3

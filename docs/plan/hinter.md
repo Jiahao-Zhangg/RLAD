@@ -2,7 +2,7 @@
 
 ## High-level idea
 
-Start with 10 training questions and maintain one evolving hint for each question, forming a 10-entry hint book. In every round, 10 subagents revise the hints in parallel using only their assigned training question and its observed results. The held-out questions are strictly invisible to all subagents: they are used only by a private evaluator, which returns aggregate transfer scores. Each revision is kept or discarded independently, so the hint book gradually becomes a collection of reusable mathematical strategies rather than problem-specific solutions.
+Start with 10 training questions and maintain one evolving hint for each question, forming a 10-entry hint book. In every round, 10 subagents revise the hints in parallel using only their assigned training question and its complete held-out-safe history from all previous rounds. The held-out questions are strictly invisible to all subagents: they are used only by a private evaluator, which returns aggregate transfer scores. Each revision is kept or discarded independently, so the hint book gradually becomes a collection of reusable mathematical strategies rather than problem-specific solutions.
 
 You are the autonomous autoresearch teacher. Maintain exactly 10 hints for a fixed Qwen3-1.7B student.
 
@@ -101,10 +101,12 @@ train_i = accuracy(q_i, h_i)
 
 heldout_i = mean over all 10 held-out questions q of accuracy(q, h_i)
 
-J_i = train_i + heldout_i
+J_i = train_i + lambda * heldout_i
 ```
 
-This is the `lambda = 1` objective for that hint.
+Freeze `lambda` before setup and never change it within a run. The default
+`work_zsw` run uses `lambda = 1`; the isolated comparison runs use
+`lambda = 2`, `5`, and `10`.
 
 The main process and all subagents may inspect the assigned training question, answer, rollouts, and grader results. They must not inspect held-out question text, answers, rollouts, or per-question results. The private evaluator reveals only `heldout_i` and `J_i` for each hint.
 
@@ -135,11 +137,15 @@ Subagent `i` receives:
 - its assigned training question and answer;
 - the current `hint_i`;
 - its previous `train_i`, aggregate `heldout_i`, and `J_i`;
+- every held-out-safe artifact from all previous rounds for that same assigned
+  question, exposed through its per-round `worker_history/hint_ii.json`
+  manifest (including its own prior training rollouts, proposals, decisions,
+  and aggregate-only private scores);
 - the global hint token limits.
 
 It must obtain fresh training rollouts and grader results by submitting its own one-GPU Slurm job as described above.
 
-Each subagent proposes exactly one revised version of its own hint. It must not edit any other hint, and it must not access any held-out question or hidden held-out evaluation detail while forming the proposal.
+Each subagent proposes exactly one revised version of its own hint. It must not edit any other hint, read another hint's history, or access any held-out question or hidden held-out evaluation detail while forming the proposal.
 
 After all 10 proposals return:
 
@@ -174,7 +180,7 @@ Before research:
 
 After verification, freeze everything except the 10 hint texts.
 
-The autoresearch agent is responsible only for optimizing the 10 hints on the train and held-out objective. Do not mention or access any separate evaluation set. When the search appears converged, stop and return the frozen hint book; evaluation will be performed later by a separate process.
+The autoresearch agent is responsible only for optimizing the 10 hints on the train and held-out objective. Do not mention or access any separate evaluation set. Run all 20 rounds even if the search appears converged or several consecutive rounds keep no hints. After round 20, return the frozen hint book; evaluation will be performed later by a separate process. Only an explicit human stop may end the run before round 20.
 
 ## Logging
 
@@ -262,6 +268,7 @@ research/rounds/<round>/book_before.json
 research/rounds/<round>/book_proposals.json
 research/rounds/<round>/book_after.json
 research/rounds/<round>/metrics.json
+research/rounds/<round>/worker_history/hint_<id>.json
 ```
 
 `metrics.json` should contain all 10 old/proposed/final metric records and the round aggregates.
@@ -279,12 +286,10 @@ Never log held-out problem contents, answers, rollouts, per-question held-out sc
 
 ## No-hack rules
 
-Never inspect hidden held-out details. Never change the model, split, grader, rollout count, objective, or scoring procedure after research starts. Never put answers in hints or silently drop questions.
+Never inspect hidden held-out details. Never change the model, split, grader, rollout count, configured lambda, objective, or scoring procedure after research starts. Never put answers in hints or silently drop questions.
 
-Continue running parallel rounds until one of these conditions holds:
-
-1. no hint is kept for 3 consecutive rounds;
-2. the declared experiment budget is exhausted; or
-3. the human stops you.
+Run exactly 20 parallel rounds. A zero-keep round, any number of consecutive
+zero-keep rounds, or apparent convergence is not a stopping condition. The
+only permitted early termination is an explicit human stop.
 
 Then save and return the final frozen 10-hint book. Do not run any separate evaluation.
